@@ -4,15 +4,20 @@ version = "0.1.0"
 description = "Python project diffusion-language-model"
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
-dependencies = [
-    "numpy>=2.2.3",
-    "torch==2.2.0",
-]
+license = { text = "MIT" }
+dependencies = ["numpy>=2.2.3", "torch==2.2.0"]
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
+
+# Corrected setuptools configuration for src layout
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true
 
 [tool.ruff]
 line-length = 88
@@ -44,22 +49,12 @@ disallow_incomplete_defs = true
 testpaths = ["tests"]
 python_files = "test_*.py"
 addopts = "--verbose --cov=src --cov=main.py --cov-report=term-missing"
+pythonpath = ["."] # This helps pytest find the src directory
 markers = [
     "unit: marks tests as unit tests",
     "integration: marks tests as integration tests",
 ]
 
-[dependency-groups]
-dev = [
-    "debugpy>=1.8.13",
-    "ipykernel>=6.29.5",
-    "mypy>=1.15.0",
-    "notebook>=7.3.2",
-    "pre-commit>=4.1.0",
-    "pytest>=8.3.5",
-    "pytest-cov>=6.0.0",
-    "ruff>=0.9.10",
-]
 [project.optional-dependencies]
 dev = [
     "ruff",
