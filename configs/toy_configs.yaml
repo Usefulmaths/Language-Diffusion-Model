@@ -1,0 +1,47 @@
+seed: 42
+tokenizer:
+  tokenizer_name: "bert-base-uncased"
+  mask_token: "[MASK]"
+  pad_token: "[PAD]"
+  bos_token: "[CLS]"
+  eos_token: "[SEP]"
+transformer:
+  d_model: 64
+  nhead: 4
+  num_layers: 4
+  dim_feedforward: 128
+  dropout: 0.1
+  layer_norm_eps: 1.0e-12
+  max_position_embeddings: 512
+masking:
+  strategy: "random"
+  mask_ratio: null
+training:
+  batch_size: 16
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  num_epochs: 1000
+  max_length: 32
+  num_workers: 0
+  device: "cpu"
+  use_amp: false
+  gradient_clip_val: 1.0
+  early_stopping_patience: null
+  log_interval: 10
+  checkpoint_dir: "checkpoints"
+  evaluation:
+    eval_steps: 100
+    eval_mask_ratio: 0.15
+    num_examples: 3
+    eval_batch_size: 16
+  scheduler:
+    warmup_steps: 100
+    initial_lr: 0.0001
+    peak_lr: 0.005
+    stable_lr: 0.0001
+    final_lr: 0.0001
+data:
+  train_file: "data/small_questions.txt"
+  val_file: null
+  train_ratio: 0.9
+  shuffle: true

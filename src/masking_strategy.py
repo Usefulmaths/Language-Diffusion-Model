@@ -1,32 +1,27 @@
 """Masking strategies for diffusion language models."""
 
-from typing import Protocol
+from typing import Literal, Protocol
 
 import torch
 from torch import Tensor
 
 
 class MaskingStrategy(Protocol):
-    """Protocol defining the interface for masking strategies in the LLaDA model.
+    """Protocol defining the interface for masking strategies during forward process.
 
-    A masking strategy determines how tokens are masked during the forward process
-    and how they are remasked during the reverse process of diffusion.
+    A masking strategy determines how tokens are masked during training.
     """
 
     def apply_random_mask(
         self,
         input_ids: Tensor,
-        mask_token_id: int,
         mask_prob: float,
-        pad_token_id: int | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Apply random masking to input tokens.
 
         Args:
             input_ids: Input token IDs of shape [batch_size, seq_len]
-            mask_token_id: ID of the mask token
             mask_prob: Probability of masking each token
-            pad_token_id: ID of the padding token (optional)
 
         Returns:
             Tuple containing:
@@ -35,172 +30,235 @@ class MaskingStrategy(Protocol):
         """
         ...
 
-    def remask_tokens(
+
+class RemaskingStrategy(Protocol):
+    """Protocol defining the interface for remasking strategies during reverse process.
+
+    A remasking strategy determines how tokens are remasked during generation.
+    """
+
+    def apply_remask(
         self,
-        sequence: Tensor,
-        predictions: Tensor,
+        input_ids: Tensor,
         logits: Tensor,
         mask_indices: Tensor,
-        mask_token_id: int,
         remask_ratio: float,
-        prompt_len: int = 0,
-        use_confidence: bool = True,
+        prompt_positions: Tensor = None,
     ) -> Tensor:
-        """Remask tokens during the reverse diffusion process.
+        """Apply remasking during the reverse diffusion process.
 
         Args:
-            sequence: Current sequence with masks
-            predictions: Predicted tokens from the model
-            logits: Raw logits from the model
-            mask_indices: Boolean tensor indicating which tokens are masked
-            mask_token_id: ID of the mask token
-            remask_ratio: Ratio of tokens to be remasked
-            prompt_len: Length of the prompt-tokens before prompt_len won't be remasked
-            use_confidence: Whether to use token confidence for remasking
+            input_ids: Current token IDs of shape [batch_size, seq_len]
+            logits: Model predictions of shape [batch_size, seq_len, vocab_size]
+            mask_indices: Boolean tensor indicating which tokens were
+                previously masked
+            remask_ratio: Ratio of previously masked tokens to remask again
+            prompt_positions: Optional boolean tensor indicating positions that
+                are part of the prompt
 
         Returns:
-            Next sequence with remasked tokens
+            Updated input_ids with remasking applied
         """
         ...
 
 
 class RandomMaskingStrategy:
-    """Implements random masking and remasking for the LLaDA model."""
+    """Random masking strategy for the forward process in diffusion language models."""
+
+    def __init__(
+        self,
+        bos_token_id: int = 101,
+        eos_token_id: int = 102,
+        pad_token_id: int = 0,
+        mask_token_id: int = 103,
+    ):
+        """Initialize with token IDs for special tokens.
+
+        Args:
+            bos_token_id: Beginning of sequence token ID
+            eos_token_id: End of sequence token ID
+            pad_token_id: Padding token ID
+            mask_token_id: Mask token ID
+        """
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.pad_token_id = pad_token_id
+        self.mask_token_id = mask_token_id
 
     def apply_random_mask(
+        self, input_ids: Tensor, mask_prob: float
+    ) -> tuple[Tensor, Tensor]:
+        """Randomly mask eligible tokens with probability mask_prob.
+
+        Eligible tokens are those that are not BOS, EOS, or PAD.
+
+        Args:
+            input_ids: Tensor of shape [batch_size, seq_len] with token IDs.
+            mask_prob: Probability for each eligible token to be masked.
+
+        Returns:
+            A tuple (masked_input, mask_indices) where:
+              - masked_input: A copy of input_ids with masked tokens replaced.
+              - mask_indices: A boolean tensor indicating masked positions.
+        """
+        masked_input = input_ids.clone()
+        eligible_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        eligible_mask &= input_ids != self.bos_token_id
+        eligible_mask &= input_ids != self.eos_token_id
+        eligible_mask &= input_ids != self.pad_token_id
+
+        rand = torch.rand_like(input_ids, dtype=torch.float)
+        mask_indices = (rand < mask_prob) & eligible_mask
+        masked_input[mask_indices] = self.mask_token_id
+
+        return masked_input, mask_indices
+
+
+class RandomRemaskingStrategy:
+    """Random remasking strategy for the reverse process."""
+
+    def __init__(
+        self,
+        bos_token_id: int = 101,
+        eos_token_id: int = 102,
+        pad_token_id: int = 0,
+        mask_token_id: int = 103,
+    ):
+        """Initialize with token IDs for special tokens.
+
+        Args:
+            bos_token_id: Beginning of sequence token ID
+            eos_token_id: End of sequence token ID
+            pad_token_id: Padding token ID
+            mask_token_id: Mask token ID
+        """
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.pad_token_id = pad_token_id
+        self.mask_token_id = mask_token_id
+
+    def apply_remask(
         self,
         input_ids: Tensor,
-        mask_token_id: int,
-        mask_prob: float,
-        pad_token_id: int | None = None,
-    ) -> tuple[Tensor, Tensor]:
-        """Apply random masking to input tokens.
-
-        Randomly masks tokens with probability mask_prob, excluding padding and
-        special tokens. Completely vectorized implementation.
-        """
-        batch_size, seq_len = input_ids.shape
-        device = input_ids.device
-        masked_input = input_ids.clone()
-
-        # Identify special tokens to exclude from masking
-        special_tokens_mask = (
-            (input_ids == 101)  # CLS/BOS
-            | (input_ids == 102)  # SEP/EOS
-        )
-
-        # Add PAD tokens to excluded tokens if specified
-        if pad_token_id is not None:
-            special_tokens_mask = special_tokens_mask | (input_ids == pad_token_id)
-
-        # Create mask for eligible tokens (non-special tokens)
-        eligible_mask = ~special_tokens_mask
-
-        # Generate random values and set non-eligible tokens to infinity
-        rand = torch.rand_like(input_ids, dtype=torch.float)
-        rand = rand.masked_fill(~eligible_mask, float("inf"))
-
-        # Create sequence-relative ranking
-        # This is the key to a truly vectorized approach
-        values, _ = torch.sort(rand, dim=1)
-
-        # Get threshold values for each sequence (the nth smallest value
-        # where n is the number to mask)
-        num_to_mask = (eligible_mask.sum(dim=1) * mask_prob).long()
-        max_masks = int(num_to_mask.max().item())
-
-        # Handle case where some sequences need fewer masks than others
-        # by padding the values tensor with infinities
-        if max_masks > 0:
-            # Create indices for gathering thresholds
-            indices = num_to_mask - 1  # -1 because 0-indexed
-            indices = torch.clamp(indices, min=0)  # Handle case where num_to_mask=0
-
-            # Ensure we have enough values for maximum masks
-            if values.size(1) < max_masks:
-                padding = torch.full(
-                    (batch_size, max_masks - values.size(1)),
-                    float("inf"),
-                    device=device,
-                )
-                values = torch.cat([values, padding], dim=1)
-
-            # Get threshold for each sequence
-            thresholds = values.gather(1, indices.unsqueeze(1)).expand(-1, seq_len)
-
-            # Create mask based on thresholds
-            # Only mask eligible tokens with random values <= their sequence threshold
-            # AND only if the sequence actually needs masks (num_to_mask > 0)
-            needs_masks = (num_to_mask > 0).unsqueeze(1).expand(-1, seq_len)
-            masked_indices = (rand <= thresholds) & eligible_mask & needs_masks
-
-            # Apply masking
-            masked_input[masked_indices] = mask_token_id
-        else:
-            # If no masks needed, return empty mask
-            masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
-
-        return masked_input, masked_indices
-
-    def remask_tokens(
-        self,
-        sequence: Tensor,
-        predictions: Tensor,
         logits: Tensor,
         mask_indices: Tensor,
-        mask_token_id: int,
         remask_ratio: float,
-        prompt_len: int = 0,
-        use_confidence: bool = False,  # Default for random strategy
+        prompt_positions: Tensor = None,
     ) -> Tensor:
-        """Remask tokens during the reverse diffusion process.
+        """Apply random remasking during the reverse diffusion process.
 
-        For the random strategy, we randomly select tokens to remask across all batches
-        in a fully vectorized approach.
+        Args:
+            input_ids: Current token IDs [batch_size, seq_len]
+            logits: Model predictions [batch_size, seq_len, vocab_size]
+            mask_indices: Which tokens were previously masked
+            remask_ratio: Ratio of previously masked tokens to remask
+            prompt_positions: Optional tensor marking prompt positions
+
+        Returns:
+            Updated input_ids with remasking applied
         """
-        next_sequence = sequence.clone()
-        device = sequence.device
+        seq = input_ids.clone()
+        batch_size, seq_length = seq.shape
+        device = seq.device
 
-        # Fill in predictions for masked tokens
-        next_sequence[mask_indices] = predictions[mask_indices]
+        # Don't remask special tokens or prompt tokens
+        valid_for_remasking = torch.ones_like(seq, dtype=torch.bool)
+        valid_for_remasking &= seq != self.bos_token_id
+        valid_for_remasking &= seq != self.eos_token_id
+        valid_for_remasking &= seq != self.pad_token_id
 
-        # Create mask for valid tokens (after prompt and not special tokens)
-        # 1. Identify tokens after prompt
-        valid_tokens = torch.ones_like(sequence, dtype=torch.bool)
-        if prompt_len > 0:
-            valid_tokens[:, :prompt_len] = False
+        # Don't remask prompt positions if provided
+        if prompt_positions is not None:
+            valid_for_remasking &= ~prompt_positions
 
-        # 2. Exclude special tokens
-        special_tokens = torch.isin(
-            sequence, torch.tensor([0, 101, 102], device=device)
+        # Only consider positions that were masked in the previous step
+        valid_for_remasking &= mask_indices
+
+        # Count how many tokens are eligible for remasking
+        num_eligible = valid_for_remasking.sum().item()
+
+        if num_eligible > 0 and remask_ratio > 0:
+            # Calculate how many tokens to remask
+            num_to_remask = int(num_eligible * remask_ratio)
+
+            if num_to_remask > 0:
+                # Get positions eligible for remasking
+                flat_indices = valid_for_remasking.nonzero(as_tuple=True)
+
+                # Randomly select positions to remask
+                perm = torch.randperm(num_eligible, device=device)
+                remask_indices = perm[:num_to_remask]
+
+                # Get the actual positions to remask
+                remask_positions = tuple(idx[remask_indices] for idx in flat_indices)
+
+                # Apply remasking
+                seq[remask_positions] = self.mask_token_id
+
+        return seq
+
+
+def create_masking_strategy(
+    strategy_name: Literal["random"],
+    bos_token_id: int,
+    eos_token_id: int,
+    pad_token_id: int,
+    mask_token_id: int,
+) -> MaskingStrategy:
+    """Create a masking strategy based on the configuration.
+
+    Args:
+        strategy_name: Type of masking strategy to create
+        bos_token_id: Beginning of sentence token ID
+        eos_token_id: End of sentence token ID
+        pad_token_id: Padding token ID
+        mask_token_id: Mask token ID
+
+    Returns:
+        A concrete masking strategy implementation
+
+    Raises:
+        ValueError: If an unsupported masking strategy is specified
+    """
+    if strategy_name == "random":
+        return RandomMaskingStrategy(
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            mask_token_id=mask_token_id,
         )
-        valid_tokens = valid_tokens & (~special_tokens)
+    else:
+        raise ValueError(f"Unsupported masking strategy: {strategy_name}")
 
-        # Count total valid tokens
-        num_valid = valid_tokens.sum().item()
 
-        # If we have valid tokens to potentially mask
-        if num_valid > 0:
-            # Calculate number of tokens to mask across all batches
-            num_to_mask = int(num_valid * remask_ratio)
+def create_remasking_strategy(
+    strategy_name: Literal["random"],
+    bos_token_id: int,
+    eos_token_id: int,
+    pad_token_id: int,
+    mask_token_id: int,
+) -> RemaskingStrategy:
+    """Create a remasking strategy based on the configuration.
 
-            if num_to_mask > 0:
-                # Create random values for all valid tokens
-                rand = torch.rand_like(sequence.float())
-                # Set random values to infinity for invalid tokens so they won't
-                # be selected
-                rand[~valid_tokens] = float("inf")
+    Args:
+        strategy_name: Type of remasking strategy to create
+        bos_token_id: Beginning of sentence token ID
+        eos_token_id: End of sentence token ID
+        pad_token_id: Padding token ID
+        mask_token_id: Mask token ID
 
-                # Find the k smallest random values (positions to mask)
-                # This returns flattened indices
-                flat_indices = torch.topk(rand.view(-1), num_to_mask, largest=False)[1]
+    Returns:
+        A concrete remasking strategy implementation
 
-                # Convert flat indices back to 2D indices
-                batch_size, seq_len = sequence.shape
-                batch_indices = flat_indices // seq_len
-                token_indices = flat_indices % seq_len
-
-                # Apply masking in one operation
-                next_sequence[batch_indices, token_indices] = mask_token_id
-
-        return next_sequence
+    Raises:
+        ValueError: If an unsupported remasking strategy is specified
+    """
+    if strategy_name == "random":
+        return RandomRemaskingStrategy(
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            mask_token_id=mask_token_id,
+        )
+    else:
+        raise ValueError(f"Unsupported remasking strategy: {strategy_name}")

@@ -1,145 +1,247 @@
-"""Test suite for the RandomMaskingStrategy class."""
-
-import pytest
 import torch
-from torch import Tensor
 
-from src.masking_strategy import MaskingStrategy, RandomMaskingStrategy
+from src.masking_strategy import RandomMaskingStrategy, RandomRemaskingStrategy
 
 
-class TestRandomMaskingStrategy:
-    """Test suite for the RandomMaskingStrategy class."""
+class TestMaskingStrategy:
+    def test_random_masking(self):
+        # Test the forward masking process
+        strategy = RandomMaskingStrategy(
+            bos_token_id=101, eos_token_id=102, pad_token_id=0, mask_token_id=103
+        )
 
-    @pytest.fixture  # type: ignore
-    def strategy(self) -> MaskingStrategy:
-        """Create a RandomMaskingStrategy instance for testing."""
-        return RandomMaskingStrategy()
+        # Create a sample input
+        input_ids = torch.tensor(
+            [
+                [101, 450, 231, 102, 0],  # Normal sequence with padding
+                [101, 450, 231, 450, 102],  # Sequence without padding
+            ]
+        )
 
-    @pytest.fixture  # type: ignore
-    def sample_batch(self) -> tuple[Tensor, int, int, int]:
-        """Create a sample batch of token IDs for testing."""
-        batch_size: int = 2
-        seq_len: int = 10
-
-        torch.manual_seed(42)
-        input_ids: Tensor = torch.randint(1, 100, (batch_size, seq_len))
-        input_ids[:, 0] = 101  # BOS token
-        input_ids[:, -1] = 102  # EOS token
-
-        pad_token_id: int = 0
-        mask_token_id: int = 103
-
-        return input_ids, mask_token_id, pad_token_id, seq_len
-
-    def test_apply_random_mask_basic(
-        self,
-        strategy: RandomMaskingStrategy,
-        sample_batch: tuple[Tensor, int, int, int],
-    ) -> None:
-        """Test the apply_random_mask method with basic inputs.
-
-        Args:
-            strategy (RandomMaskingStrategy): _description_
-            sample_batch (tuple[Tensor, int, int, int]): _description_
-        """
-        input_ids, mask_token_id, pad_token_id, seq_len = sample_batch
-        mask_prob: float = 0.15
-
+        # Test with 100% mask probability to make the test deterministic
         masked_input, mask_indices = strategy.apply_random_mask(
-            input_ids, mask_token_id, mask_prob, pad_token_id
+            input_ids, mask_prob=1.0
         )
 
-        assert torch.all(masked_input[mask_indices] == mask_token_id)
-        assert torch.all(masked_input[~mask_indices] == input_ids[~mask_indices])
+        # Check that special tokens are not masked
+        assert torch.all(masked_input[:, 0] == 101)  # BOS not masked
+        assert torch.all(masked_input[0, 3] == 102)  # EOS not masked
+        assert torch.all(masked_input[1, 4] == 102)  # EOS not masked
+        assert torch.all(masked_input[0, 4] == 0)  # PAD not masked
 
-    def test_remask_tokens_basic(
-        self,
-        strategy: RandomMaskingStrategy,
-        sample_batch: tuple[Tensor, int, int, int],
-    ) -> None:
-        """Test the remask_tokens method with basic inputs.
+        # Check that all eligible tokens are masked
+        assert torch.all(masked_input[0, 1:3] == 103)  # All normal tokens masked
+        assert torch.all(masked_input[1, 1:4] == 103)  # All normal tokens masked
 
-        Args:
-            strategy (RandomMaskingStrategy): _description_
-            sample_batch (tuple[Tensor, int, int, int]): _description_
-        """
-        input_ids, mask_token_id, pad_token_id, seq_len = sample_batch
-        sequence: Tensor = input_ids.clone()
-        mask_indices: Tensor = torch.zeros_like(sequence, dtype=torch.bool)
-        mask_indices[:, 2:8:2] = True
-        sequence[mask_indices] = mask_token_id
+        # Check mask_indices
+        expected_mask = torch.tensor(
+            [[False, True, True, False, False], [False, True, True, True, False]]
+        )
+        assert torch.all(mask_indices == expected_mask)
 
-        predictions: Tensor = torch.randint(1, 100, sequence.shape)
-        logits: Tensor = torch.randn(sequence.shape + (100,))
-
-        remask_ratio: float = 0.5
-        prompt_len: int = 1
-
-        next_sequence: Tensor = strategy.remask_tokens(
-            sequence,
-            predictions,
-            logits,
-            mask_indices,
-            mask_token_id,
-            remask_ratio,
-            prompt_len=prompt_len,
+        # Test with 0% mask probability
+        masked_input, mask_indices = strategy.apply_random_mask(
+            input_ids, mask_prob=0.0
         )
 
-        assert torch.all(next_sequence[:, :prompt_len] != mask_token_id)
+        # Check that no tokens are masked
+        assert torch.all(masked_input == input_ids)
+        assert not torch.any(mask_indices)
 
-    def test_remask_tokens_deterministic(
-        self,
-        strategy: RandomMaskingStrategy,
-        sample_batch: tuple[Tensor, int, int, int],
-    ) -> None:
-        """Test that remasking is deterministic.
 
-        Args:
-            strategy (RandomMaskingStrategy): _description_
-            sample_batch (tuple[Tensor, int, int, int]): _description_
-        """
-        input_ids, mask_token_id, pad_token_id, seq_len = sample_batch
-        sequence: Tensor = input_ids.clone()
-        mask_indices: Tensor = torch.zeros_like(sequence, dtype=torch.bool)
-        predictions: Tensor = torch.randint(1, 100, sequence.shape)
-        logits: Tensor = torch.randn(sequence.shape)
+class TestRemaskingStrategy:
+    def test_apply_remask_basic(self):
+        """Test basic remasking functionality with a simple example."""
+        strategy = RandomRemaskingStrategy(
+            bos_token_id=101, eos_token_id=102, pad_token_id=0, mask_token_id=103
+        )
 
-        remask_ratio: float = 0.4
-        prompt_len: int = 1
+        # Create a sample input where some tokens have already been predicted
+        input_ids = torch.tensor(
+            [
+                [101, 450, 231, 102, 0],  # Normal sequence with padding
+                [101, 450, 231, 450, 102],  # Sequence without padding
+            ]
+        )
 
+        # Create mask indices (tokens that were masked in the previous step)
+        mask_indices = torch.tensor(
+            [[False, True, True, False, False], [False, True, True, True, False]]
+        )
+
+        # Create dummy logits (not used in this test)
+        vocab_size = 1000
+        logits = torch.zeros((2, 5, vocab_size))
+
+        # Test with 100% remask ratio (all previously masked tokens should be remasked)
+        remasked = strategy.apply_remask(
+            input_ids=input_ids,
+            logits=logits,
+            mask_indices=mask_indices,
+            remask_ratio=1.0,
+            prompt_positions=None,
+        )
+
+        # Check that all previously masked tokens are remasked
+        expected = torch.tensor(
+            [
+                [101, 103, 103, 102, 0],  # Masked tokens replaced with mask token
+                [101, 103, 103, 103, 102],  # Masked tokens replaced with mask token
+            ]
+        )
+        assert torch.all(remasked == expected)
+
+        # Test with 0% remask ratio (no tokens should be remasked)
+        remasked = strategy.apply_remask(
+            input_ids=input_ids,
+            logits=logits,
+            mask_indices=mask_indices,
+            remask_ratio=0.0,
+            prompt_positions=None,
+        )
+
+        # Check that no tokens are remasked
+        assert torch.all(remasked == input_ids)
+
+    def test_apply_remask_with_prompt(self):
+        """Test that prompt positions are not remasked."""
+        strategy = RandomRemaskingStrategy(
+            bos_token_id=101, eos_token_id=102, pad_token_id=0, mask_token_id=103
+        )
+
+        # Create a sample input
+        input_ids = torch.tensor(
+            [
+                [101, 450, 231, 450, 102],  # All tokens are valid
+            ]
+        )
+
+        # All tokens were masked in the previous step
+        mask_indices = torch.tensor(
+            [
+                [False, True, True, True, False],  # BOS and EOS weren't masked
+            ]
+        )
+
+        # Mark the first two tokens as prompt (should not be remasked)
+        prompt_positions = torch.tensor(
+            [
+                [True, True, False, False, False],
+            ]
+        )
+
+        # Create dummy logits
+        vocab_size = 1000
+        logits = torch.zeros((1, 5, vocab_size))
+
+        # Test with 100% remask ratio
+        remasked = strategy.apply_remask(
+            input_ids=input_ids,
+            logits=logits,
+            mask_indices=mask_indices,
+            remask_ratio=1.0,
+            prompt_positions=prompt_positions,
+        )
+
+        # Check that prompt positions are not remasked
+        expected = torch.tensor(
+            [
+                [101, 450, 103, 103, 102],  # Only non-prompt masked tokens are remasked
+            ]
+        )
+        assert torch.all(remasked == expected)
+
+    def test_apply_remask_partial(self):
+        """Test partial remasking with controlled randomness."""
+        strategy = RandomRemaskingStrategy(
+            bos_token_id=101, eos_token_id=102, pad_token_id=0, mask_token_id=103
+        )
+
+        # Create a sample with many tokens to test partial remasking
+        input_ids = torch.tensor([[101, 201, 202, 203, 204, 205, 206, 207, 208, 102]])
+
+        # All tokens except BOS and EOS were masked in the previous step
+        mask_indices = torch.tensor(
+            [[False, True, True, True, True, True, True, True, True, False]]
+        )
+
+        # Create dummy logits
+        vocab_size = 1000
+        logits = torch.zeros((1, 10, vocab_size))
+
+        # Use a fixed seed for deterministic testing
         torch.manual_seed(42)
-        result1: Tensor = strategy.remask_tokens(
-            sequence,
-            predictions,
-            logits,
-            mask_indices,
-            mask_token_id,
-            remask_ratio,
-            prompt_len,
+
+        # Test with 50% remask ratio
+        remasked = strategy.apply_remask(
+            input_ids=input_ids,
+            logits=logits,
+            mask_indices=mask_indices,
+            remask_ratio=0.5,
+            prompt_positions=None,
         )
 
-        torch.manual_seed(42)
-        result2: Tensor = strategy.remask_tokens(
-            sequence,
-            predictions,
-            logits,
-            mask_indices,
-            mask_token_id,
-            remask_ratio,
-            prompt_len,
+        # Count how many tokens were remasked
+        num_remasked = torch.sum(remasked == 103).item()
+        num_eligible = torch.sum(mask_indices).item()
+
+        # Check that approximately 50% of eligible tokens were remasked
+        # Due to randomness, we allow some flexibility
+        assert (
+            3 <= num_remasked <= 5
+        ), f"Expected ~4 remasked tokens, got {num_remasked}"
+
+        # Verify that only previously masked tokens were remasked
+        for i in range(10):
+            if not mask_indices[0, i]:
+                assert (
+                    remasked[0, i] == input_ids[0, i]
+                ), f"Non-masked token at position {i} was changed"
+
+    def test_remask_ratio_edge_cases(self):
+        """Test edge cases for remask ratio."""
+        strategy = RandomRemaskingStrategy(
+            bos_token_id=101, eos_token_id=102, pad_token_id=0, mask_token_id=103
         )
 
-        assert torch.all(result1 == result2)
+        # Create a sample input
+        input_ids = torch.tensor([[101, 450, 231, 450, 102]])
 
-        torch.manual_seed(43)
-        result3: Tensor = strategy.remask_tokens(
-            sequence,
-            predictions,
-            logits,
-            mask_indices,
-            mask_token_id,
-            remask_ratio,
-            prompt_len,
+        # All tokens except BOS and EOS were masked
+        mask_indices = torch.tensor([[False, True, True, True, False]])
+
+        # Create dummy logits
+        vocab_size = 1000
+        logits = torch.zeros((1, 5, vocab_size))
+
+        # Test with negative remask ratio (should be treated as 0)
+        remasked = strategy.apply_remask(
+            input_ids=input_ids,
+            logits=logits,
+            mask_indices=mask_indices,
+            remask_ratio=-0.1,
+            prompt_positions=None,
         )
+        assert torch.all(remasked == input_ids)
 
-        assert not torch.all(result1 == result3)
+        # Test with remask ratio > 1 (should be capped at 1)
+        remasked = strategy.apply_remask(
+            input_ids=input_ids,
+            logits=logits,
+            mask_indices=mask_indices,
+            remask_ratio=1.5,
+            prompt_positions=None,
+        )
+        expected = torch.tensor([[101, 103, 103, 103, 102]])
+        assert torch.all(remasked == expected)
+
+        # Test with no eligible tokens
+        no_eligible = torch.tensor([[False, False, False, False, False]])
+        remasked = strategy.apply_remask(
+            input_ids=input_ids,
+            logits=logits,
+            mask_indices=no_eligible,
+            remask_ratio=1.0,
+            prompt_positions=None,
+        )
+        assert torch.all(remasked == input_ids)

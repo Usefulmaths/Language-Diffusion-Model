@@ -3,24 +3,40 @@ name = "diffusion-language-model"
 version = "0.1.0"
 description = "Python project diffusion-language-model"
 readme = "README.md"
-requires-python = ">=3.12"
-license = {text = "MIT"}
+requires-python = ">=3.11,<3.12" # Pin to Python 3.11
+license = { text = "MIT" }
 dependencies = [
-    "numpy>=2.2.3",
-    "torch==2.2.0",
+    "accelerate==0.25.0",
+    "matplotlib>=3.10.1",
+    "numpy<2.0",
+    "pre-commit>=4.1.0",
+    "pytest>=8.3.5",
+    "pytest-cov>=6.0.0",
+    "torch==2.1.0",
+    "torchvision==0.16.0",
+    "transformers>=4.49.0",
+    "types-pyyaml>=6.0.12.20241230",
 ]
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# Corrected setuptools configuration for src layout
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true
+
 [tool.ruff]
 line-length = 88
-target-version = "py312"
+target-version = "py311"
 lint.select = ["E", "F", "I", "N", "W", "D", "UP", "B", "C4", "SIM", "ERA"]
 lint.ignore = []
-fix = true
 lint.unfixable = []
+fix = true
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -31,7 +47,7 @@ indent-style = "space"
 line-ending = "auto"
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 strict = true
 warn_redundant_casts = true
 warn_unused_ignores = true
@@ -39,27 +55,19 @@ warn_return_any = true
 warn_unreachable = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+ignore_missing_imports = true
+disable_error_code = ["misc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
 addopts = "--verbose --cov=src --cov=main.py --cov-report=term-missing"
+pythonpath = ["."] # This helps pytest find the src directory
 markers = [
     "unit: marks tests as unit tests",
     "integration: marks tests as integration tests",
 ]
 
-[dependency-groups]
-dev = [
-    "debugpy>=1.8.13",
-    "ipykernel>=6.29.5",
-    "mypy>=1.15.0",
-    "notebook>=7.3.2",
-    "pre-commit>=4.1.0",
-    "pytest>=8.3.5",
-    "pytest-cov>=6.0.0",
-    "ruff>=0.9.10",
-]
 [project.optional-dependencies]
 dev = [
     "ruff",
