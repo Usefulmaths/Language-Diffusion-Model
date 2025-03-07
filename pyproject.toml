@@ -1,0 +1,73 @@
+[project]
+name = "diffusion-language-model"
+version = "0.1.0"
+description = "Python project diffusion-language-model"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+dependencies = [
+    "numpy>=2.2.3",
+    "torch==2.2.0",
+]
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+lint.select = ["E", "F", "I", "N", "W", "D", "UP", "B", "C4", "SIM", "ERA"]
+lint.ignore = []
+fix = true
+lint.unfixable = []
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_unreachable = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "--verbose --cov=src --cov=main.py --cov-report=term-missing"
+markers = [
+    "unit: marks tests as unit tests",
+    "integration: marks tests as integration tests",
+]
+
+[dependency-groups]
+dev = [
+    "debugpy>=1.8.13",
+    "ipykernel>=6.29.5",
+    "mypy>=1.15.0",
+    "notebook>=7.3.2",
+    "pre-commit>=4.1.0",
+    "pytest>=8.3.5",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.9.10",
+]
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+    "pytest-cov",
+    "pre-commit",
+    "notebook",
+    "ipykernel",
+    "debugpy",
+]
