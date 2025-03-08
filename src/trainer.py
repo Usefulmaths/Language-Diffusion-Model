@@ -3,6 +3,7 @@
 import logging
 import os
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -12,9 +13,27 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from src.datatypes import TrainingMetrics
 from src.loss import variational_lower_bound_loss
 from src.model import DiffusionLanguageModel
+
+
+@dataclass
+class TrainingMetrics:
+    """Container for training metrics."""
+
+    epoch: int
+    loss: float
+    learning_rate: float
+    epoch_time: float
+
+    def __str__(self) -> str:
+        """Convert metrics to string for logging."""
+        return (
+            f"Epoch: {self.epoch}, "
+            f"Loss: {self.loss:.4f}, "
+            f"Learning Rate: {self.learning_rate:.8f}, "
+            f"Time: {self.epoch_time:.2f}s"
+        )
 
 
 class DiffusionLanguageModelTrainer:

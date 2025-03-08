@@ -1,39 +1,55 @@
 """Custom dataset for loading questions."""
 
 from collections.abc import Callable
-from typing import TypeVar
+from typing import TypedDict
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
 from src.tokenizer import DiffusionTokenizer
 
-T = TypeVar("T")
+
+class DatasetItem(TypedDict):
+    """Dataset item structure with 1D tensors."""
+
+    input_ids: torch.Tensor  # Shape: [seq_len]
+    attention_mask: torch.Tensor  # Shape: [seq_len]
 
 
-class QuestionDataset(Dataset[dict[str, torch.Tensor]]):
-    """Dataset for loading questions from a formatted text file.
+# Custom collate function to handle variable length sequences
+def collate_batch(batch: list[DatasetItem]) -> DatasetItem:
+    """Collate function for variable length sequences.
 
-    Each line in the file is formatted as:
-    /url-path@@Question text@@ID@@[tags]@@[related_questions]
+    Args:
+        batch: List of dataset items
+
+    Returns:
+        Batched dataset item with padded sequences
     """
+    input_ids = [item["input_ids"] for item in batch]
+    attention_masks = [item["attention_mask"] for item in batch]
+
+    # Pad sequences to the maximum length in the batch
+    input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=0)
+    attention_masks_padded = pad_sequence(
+        attention_masks, batch_first=True, padding_value=0
+    )
+
+    return {"input_ids": input_ids_padded, "attention_mask": attention_masks_padded}
+
+
+class QuestionDataset(Dataset[DatasetItem]):
+    """Dataset for loading questions from a formatted text file."""
 
     def __init__(
         self,
         file_path: str,
         tokenizer: DiffusionTokenizer,
         max_length: int = 512,
-        transform: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]]
-        | None = None,
+        transform: Callable[[DatasetItem], DatasetItem] | None = None,
     ):
-        """Initialize the dataset.
-
-        Args:
-            file_path: Path to the question file
-            tokenizer: Tokenizer for encoding questions
-            max_length: Maximum sequence length
-            transform: Optional transform to apply to the tokenized input
-        """
+        """Initialize the dataset."""
         self.file_path = file_path
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -43,11 +59,7 @@ class QuestionDataset(Dataset[dict[str, torch.Tensor]]):
         self.questions = self._load_questions()
 
     def _load_questions(self) -> list[str]:
-        """Load questions from the file.
-
-        Returns:
-            List of questions
-        """
+        """Load questions from the file."""
         questions = []
 
         with open(self.file_path, encoding="utf-8") as f:
@@ -67,52 +79,33 @@ class QuestionDataset(Dataset[dict[str, torch.Tensor]]):
         return questions
 
     def __len__(self) -> int:
-        """Return the number of questions in the dataset.
-
-        Returns:
-            Number of questions
-        """
+        """Return the number of questions in the dataset."""
         return len(self.questions)
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        """Get a question by index.
-
-        Args:
-            idx: Index of the question
-
-        Returns:
-            Dictionary containing tokenized inputs
-        """
+    def __getitem__(self, idx: int) -> DatasetItem:
+        """Get a question by index."""
         question = self.questions[idx]
 
-        # Tokenize the question
+        # Tokenize the question - Don't pad here, let the collate function handle it
         encoding = self.tokenizer.encode(
             question,
-            padding=True,
+            padding=False,  # Don't pad individual items
             truncation=True,
             max_length=self.max_length,
+            return_batch_dimension=False,  # Get 1D tensors
         )
 
-        # Ensure input_ids and attention_mask have correct shape [batch_size, seq_len]
-        if (
-            "input_ids" in encoding
-            and len(encoding["input_ids"].shape) == 2
-            and encoding["input_ids"].shape[0] == 1
-        ):
-            encoding["input_ids"] = encoding["input_ids"].squeeze(0)
-
-        if (
-            "attention_mask" in encoding
-            and len(encoding["attention_mask"].shape) == 2
-            and encoding["attention_mask"].shape[0] == 1
-        ):
-            encoding["attention_mask"] = encoding["attention_mask"].squeeze(0)
+        # Create a properly typed result
+        result: DatasetItem = {
+            "input_ids": encoding["input_ids"],
+            "attention_mask": encoding["attention_mask"],
+        }
 
         # Apply transform if provided
         if self.transform is not None:
-            encoding = self.transform(encoding)
+            result = self.transform(result)
 
-        return encoding
+        return result
 
 
 def create_question_dataloaders(
@@ -123,23 +116,8 @@ def create_question_dataloaders(
     train_ratio: float = 0.9,
     shuffle: bool = True,
     num_workers: int = 4,
-) -> tuple[
-    DataLoader[dict[str, torch.Tensor]], DataLoader[dict[str, torch.Tensor]] | None
-]:
-    """Create dataloaders for training and validation.
-
-    Args:
-        file_path: Path to the question file
-        tokenizer: Tokenizer for encoding questions
-        batch_size: Batch size for dataloaders
-        max_length: Maximum sequence length
-        train_ratio: Ratio of data to use for training (rest for validation)
-        shuffle: Whether to shuffle the data
-        num_workers: Number of workers for data loading
-
-    Returns:
-        Tuple of (train_dataloader, val_dataloader)
-    """
+) -> tuple[DataLoader[DatasetItem], DataLoader[DatasetItem] | None]:
+    """Create dataloaders for training and validation."""
     # Create dataset
     dataset = QuestionDataset(
         file_path=file_path,
@@ -152,32 +130,29 @@ def create_question_dataloaders(
     train_size = int(train_ratio * dataset_size)
     val_size = dataset_size - train_size
 
-    # Split into train and validation sets
-    dataset_size = len(dataset)
-    train_size = int(train_ratio * dataset_size)
-    val_size = dataset_size - train_size
-
-    # First create the train dataloader (always created)
+    # Create dataloaders with the custom collate function
     if val_size > 0:
         # Split the dataset
         train_subset, val_subset = torch.utils.data.random_split(
             dataset, [train_size, val_size]
         )
 
-        # Create train dataloader from the subset
+        # Create train dataloader with custom collate function
         train_loader = DataLoader(
             train_subset,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
+            collate_fn=collate_batch,  # Use our custom collate function
         )
 
-        # Create validation dataloader
+        # Create validation dataloader with custom collate function
         val_loader = DataLoader(
             val_subset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
+            collate_fn=collate_batch,
         )
     else:
         # Use full dataset for training
@@ -186,13 +161,8 @@ def create_question_dataloaders(
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
+            collate_fn=collate_batch,
         )
         val_loader = None
 
-    # Type annotation for return value
-    result: tuple[
-        DataLoader[dict[str, torch.Tensor]],
-        DataLoader[dict[str, torch.Tensor]] | None,
-    ] = (train_loader, val_loader)
-
-    return result
+    return (train_loader, val_loader)

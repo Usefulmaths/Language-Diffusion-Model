@@ -1,6 +1,7 @@
 """Transformer model for the diffusion language model."""
 
 import math
+from dataclasses import dataclass
 from typing import cast
 
 import torch
@@ -8,7 +9,19 @@ import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 
-from src.datatypes import DiffusionTransformerConfig
+
+@dataclass
+class DiffusionTransformerConfig:
+    """Configuration for DiffusionTransformer."""
+
+    vocab_size: int = 30522  # Default BERT vocab size
+    d_model: int = 768
+    nhead: int = 12
+    num_layers: int = 12
+    dim_feedforward: int = 3072
+    dropout: float = 0.1
+    layer_norm_eps: float = 1e-12
+    max_position_embeddings: int = 512
 
 
 class RMSNorm(nn.Module):

@@ -1,6 +1,6 @@
 """Masking strategies for diffusion language models."""
 
-from typing import Protocol
+from typing import Literal, Protocol
 
 import torch
 from torch import Tensor
@@ -285,3 +285,33 @@ class RandomMaskingStrategy:
                 next_sequence[batch_indices, token_indices] = mask_token_id
 
         return next_sequence
+
+
+def create_masking_strategy(
+    strategy_name: Literal["random"],
+    bos_token_id: int,
+    eos_token_id: int,
+    pad_token_id: int,
+) -> MaskingStrategy:
+    """Create a masking strategy based on the configuration.
+
+    Args:
+        strategy_name: Type of masking strategy to create
+        bos_token_id: Beginning of sentence token ID
+        eos_token_id: End of sentence token ID
+        pad_token_id: Padding token ID
+
+    Returns:
+        A concrete masking strategy implementation
+
+    Raises:
+        ValueError: If an unsupported masking strategy is specified
+    """
+    if strategy_name == "random":
+        return RandomMaskingStrategy(
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+        )
+    else:
+        raise ValueError(f"Unsupported masking strategy: {strategy_name}")
