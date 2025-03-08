@@ -3,7 +3,7 @@ name = "diffusion-language-model"
 version = "0.1.0"
 description = "Python project diffusion-language-model"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
     "numpy<2.0",
@@ -29,7 +29,7 @@ namespaces = true
 
 [tool.ruff]
 line-length = 88
-target-version = "py312"
+target-version = "py311"
 lint.select = ["E", "F", "I", "N", "W", "D", "UP", "B", "C4", "SIM", "ERA"]
 lint.ignore = []
 lint.unfixable = []
@@ -44,7 +44,7 @@ indent-style = "space"
 line-ending = "auto"
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 strict = true
 warn_redundant_casts = true
 warn_unused_ignores = true
