@@ -1,4 +1,4 @@
-"""Trainer for diffusion language models using accelerate."""
+"""Trainer for diffusion language models with diagnostics for loss investigation."""
 
 import logging
 import os
@@ -48,6 +48,7 @@ class DiffusionLanguageModelTrainer:
         checkpoint_dir: str | None = None,
         log_interval: int = 100,
         gradient_clip_val: float | None = None,
+        debug_mode: bool = True,
     ):
         """Initialize the trainer.
 
@@ -59,6 +60,7 @@ class DiffusionLanguageModelTrainer:
             checkpoint_dir: Directory to save checkpoints.
             log_interval: Number of steps between logging.
             gradient_clip_val: Maximum gradient norm for gradient clipping.
+            debug_mode: Enable detailed diagnostics for debugging.
         """
         # Use provided accelerator or create a new one if not provided
         # This avoids re-initializing the accelerator if it already exists
@@ -70,6 +72,7 @@ class DiffusionLanguageModelTrainer:
         self.checkpoint_dir = checkpoint_dir
         self.log_interval = log_interval
         self.gradient_clip_val = gradient_clip_val
+        self.debug_mode = debug_mode
 
         # Create checkpoint directory if needed
         if self.checkpoint_dir:
@@ -82,14 +85,106 @@ class DiffusionLanguageModelTrainer:
         self.best_loss: float = float("inf")
         self.global_step: int = 0
 
-        # Prepare model and optimizer with accelerator (separately to avoid tupl
-        # unpacking issues)
+        # Prepare model and optimizer with accelerator (separately to avoid tuple unpacking issues)
         self.model = self.accelerator.prepare(model)
         self.optimizer = self.accelerator.prepare(optimizer)
 
         # Prepare scheduler if provided
         if self.scheduler is not None:
             self.scheduler = self.accelerator.prepare(scheduler)
+
+    def _log_diagnostics(
+        self,
+        step: int,
+        input_ids: Tensor,
+        masked_input_ids: Tensor,
+        logits: Tensor,
+        mask_prob: float | None,
+        loss: Tensor,
+    ) -> None:
+        """Log diagnostic information for debugging.
+
+        Args:
+            step: Current step number.
+            input_ids: Original input token ids.
+            masked_input_ids: Input token ids with masks applied.
+            logits: Model predictions.
+            mask_prob: Mask probability used.
+            loss: Loss value from criterion.
+        """
+        if not self.debug_mode or step % self.log_interval != 0:
+            return
+
+        # Count masks and calculate actual mask ratio
+        mask_token_id = self.model.tokenizer.mask_token_id
+        mask_indices = masked_input_ids == mask_token_id
+        num_masks = mask_indices.sum().item()
+        total_tokens = input_ids.numel()
+        actual_mask_ratio = num_masks / total_tokens if total_tokens > 0 else 0
+
+        self.logger.info(f"DIAGNOSTICS for step {step}:")
+        self.logger.info(
+            f"  - Specified mask_prob: {mask_prob if mask_prob is not None else 'random'}"
+        )
+        self.logger.info(
+            f"  - Actual mask ratio: {actual_mask_ratio:.4f} ({num_masks}/{total_tokens})"
+        )
+        self.logger.info(f"  - Loss value: {loss.item():.6f}")
+
+        # Check predictions for a few masked tokens
+        with torch.no_grad():
+            predicted_tokens = logits.argmax(dim=-1)
+
+            # Find masked positions
+            batch_idx = 0  # First batch
+            masked_positions = (masked_input_ids[batch_idx] == mask_token_id).nonzero()
+
+            if len(masked_positions) > 0:
+                # Log up to 3 predictions
+                num_to_log = min(3, len(masked_positions))
+
+                self.logger.info("  - Sample predictions:")
+                for i in range(num_to_log):
+                    pos = masked_positions[i].item()
+                    true_token = input_ids[batch_idx, pos].item()
+                    pred_token = predicted_tokens[batch_idx, pos].item()
+
+                    # Get string representation
+                    try:
+                        true_str = self.model.tokenizer.decode([true_token])
+                        pred_str = self.model.tokenizer.decode([pred_token])
+                    except:
+                        true_str = "<unknown>"
+                        pred_str = "<unknown>"
+
+                    self.logger.info(
+                        f"    - Pos {pos}: True: {true_token} ('{true_str}') → Pred: {pred_token} ('{pred_str}')"
+                    )
+
+    def _log_gradient_stats(self) -> None:
+        """Log statistics about the gradients for debugging."""
+        if not self.debug_mode:
+            return
+
+        # Calculate gradient norm
+        total_norm = 0.0
+        max_norm = 0.0
+        min_norm = float("inf")
+
+        for name, p in self.model.named_parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2).item()
+                total_norm += param_norm**2
+                max_norm = max(max_norm, param_norm)
+                min_norm = min(min_norm, param_norm)
+
+        total_norm = total_norm**0.5
+
+        self.logger.info("  - Gradient stats:")
+        self.logger.info(f"    - Total norm: {total_norm:.6f}")
+        self.logger.info(
+            f"    - Min/Max per-parameter norm: {min_norm:.6f}/{max_norm:.6f}"
+        )
 
     def train_step(
         self,
@@ -119,6 +214,15 @@ class DiffusionLanguageModelTrainer:
             mask_prob=mask_prob,
         )
 
+        # Save pre-loss state for diagnostics
+        if self.debug_mode and self.global_step % self.log_interval == 0:
+            batch_size, seq_len = input_ids.shape
+            vocab_size = logits.shape[-1]
+            self.logger.info(
+                f"  - Input shape: [{batch_size}, {seq_len}], Logits shape: [{batch_size}, {seq_len}, {vocab_size}]"
+            )
+
+        # Calculate loss
         loss = variational_lower_bound_loss(
             logits=logits,
             targets=input_ids,
@@ -128,15 +232,37 @@ class DiffusionLanguageModelTrainer:
             pad_token_id=self.model.tokenizer.pad_token_id,
             special_token_ids=special_token_ids,
             mask_ratio=mask_prob if mask_prob is not None else 0.5,
+            debug_mode=self.debug_mode,
+            step=self.global_step,
+            log_interval=self.log_interval,
+            logger=self.logger,
+        )
+
+        # Log diagnostics before backward pass
+        self._log_diagnostics(
+            step=self.global_step,
+            input_ids=input_ids,
+            masked_input_ids=masked_input_ids,
+            logits=logits,
+            mask_prob=mask_prob,
+            loss=loss,
         )
 
         # Backward pass - accelerate handles mixed precision
         self.accelerator.backward(loss)
 
+        # Log gradient statistics
+        if self.debug_mode and self.global_step % self.log_interval == 0:
+            self._log_gradient_stats()
+
         if self.gradient_clip_val is not None:
             self.accelerator.clip_grad_norm_(
                 self.model.parameters(), self.gradient_clip_val
             )
+            if self.debug_mode and self.global_step % self.log_interval == 0:
+                self.logger.info(
+                    f"  - Applied gradient clipping with value: {self.gradient_clip_val}"
+                )
 
         self.optimizer.step()
 
@@ -258,6 +384,10 @@ class DiffusionLanguageModelTrainer:
 
         if self.accelerator.is_local_main_process:
             self.logger.info(f"Starting training for {num_epochs} epochs")
+            if mask_prob is not None:
+                self.logger.info(f"Using fixed mask probability: {mask_prob}")
+            else:
+                self.logger.info("Using random mask probability for each batch")
 
         no_improvement_count = 0
         best_val_loss = float("inf")
@@ -355,6 +485,7 @@ class DiffusionLanguageModelTrainer:
                     pad_token_id=self.model.tokenizer.pad_token_id,
                     special_token_ids=special_token_ids,
                     mask_ratio=mask_prob,
+                    debug_mode=False,  # Disable debugging for evaluation
                 )
 
                 total_loss += loss.item()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diffusion Language Model training script.
+"""Diffusion Language Model training script with diagnostics.
 
 This script trains a diffusion-based language model using a configurable
 architecture with transformer-based backbone. Configuration is loaded from
@@ -28,12 +28,22 @@ from src.trainer import DiffusionLanguageModelTrainer, TrainingMetrics
 from src.transformer import DiffusionTransformer, DiffusionTransformerConfig
 
 
-def setup_logging() -> None:
-    """Configure logging for the application."""
+def setup_logging(log_file: str | None = None, level: int = logging.INFO) -> None:
+    """Configure logging for the application.
+
+    Args:
+        log_file: Optional path to save logs to a file
+        level: Logging level
+    """
+    handlers = [logging.StreamHandler(sys.stdout)]
+
+    if log_file:
+        handlers.append(logging.FileHandler(log_file, mode="w"))
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        handlers=handlers,
     )
 
 
@@ -65,11 +75,12 @@ def get_accelerator(use_amp: bool) -> Accelerator:
         return Accelerator()
 
 
-def main(config_path: str | Path) -> list[TrainingMetrics]:
+def main(config_path: str | Path, debug: bool = False) -> list[TrainingMetrics]:
     """Main training function.
 
     Args:
         config_path: Path to the YAML configuration file
+        debug: Enable detailed diagnostics
 
     Returns:
         List of training metrics for each epoch
@@ -84,10 +95,18 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
     if not config_file.exists():
         raise FileNotFoundError(f"Config file not found: {config_file}")
 
-    # Set up logging
-    setup_logging()
+    # Create diagnostics directory
+    diagnostics_dir = Path("diagnostics")
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set up logging with file output for diagnostics
+    log_file = diagnostics_dir / "training_diagnostics.log" if debug else None
+    setup_logging(log_file=str(log_file) if log_file else None)
+
     logger = logging.getLogger(__name__)
     logger.info(f"Loading configuration from {config_file}")
+    if debug:
+        logger.info("DEBUG MODE ENABLED - detailed diagnostics will be logged")
 
     try:
         # Load configuration
@@ -106,9 +125,11 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
         logger.info(f"Using {device_type} with precision mode: {precision_mode}")
 
     # Set random seed for reproducibility
-    torch.manual_seed(config.seed)
+    seed = config.seed
+    logger.info(f"Setting random seed to {seed}")
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(config.seed)
+        torch.cuda.manual_seed_all(seed)
 
     # Initialize tokenizer
     tokenizer_config = TokenizerConfig(**vars(config.tokenizer))
@@ -116,6 +137,13 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
 
     if accelerator.is_local_main_process:
         logger.info(f"Initialized tokenizer with vocab size: {tokenizer.vocab_size}")
+
+        # Log token ID information for diagnostics
+        if debug:
+            logger.info(f"  - PAD token ID: {tokenizer.pad_token_id}")
+            logger.info(f"  - MASK token ID: {tokenizer.mask_token_id}")
+            logger.info(f"  - BOS token ID: {tokenizer.bos_token_id}")
+            logger.info(f"  - EOS token ID: {tokenizer.eos_token_id}")
 
     # Update vocab_size in transformer config based on tokenizer
     config.transformer.vocab_size = tokenizer.vocab_size
@@ -140,15 +168,22 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
 
     if accelerator.is_local_main_process:
         logger.info(f"Using masking strategy: {config.masking.strategy}")
+        if debug:
+            logger.info(f"  - Mask token ID: {tokenizer.mask_token_id}")
+            logger.info(
+                f"  - Special tokens excluded from masking: BOS={tokenizer.bos_token_id}, EOS={tokenizer.eos_token_id}, PAD={tokenizer.pad_token_id}"
+            )
 
     # Initialize model
     model = DiffusionLanguageModel(transformer, tokenizer, masking_strategy)
 
     if accelerator.is_local_main_process:
-        logger.info(
-            f"Model initialized with {sum(p.numel() for p in model.parameters())} "
-            f"parameters"
+        param_count = sum(p.numel() for p in model.parameters())
+        trainable_param_count = sum(
+            p.numel() for p in model.parameters() if p.requires_grad
         )
+        logger.info(f"Model initialized with {param_count:,} parameters")
+        logger.info(f"Trainable parameters: {trainable_param_count:,}")
 
     # Create dataloaders
     train_file_path = Path(config.data.train_file)
@@ -234,6 +269,7 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
         checkpoint_dir=str(checkpoint_dir),
         gradient_clip_val=config.training.gradient_clip_val,
         log_interval=config.training.log_interval,
+        debug_mode=debug,  # Enable diagnostics based on the debug flag
     )
 
     # Log device and mixed precision information
@@ -245,14 +281,43 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
             f"  - Learning rate: {config.training.learning_rate}\n"
             f"  - Device: {device_type}\n"
             f"  - Mixed precision: {precision_mode}\n"
+            f"  - Gradient clipping: {config.training.gradient_clip_val}\n"
+            f"  - Mask ratio: {config.masking.mask_ratio if hasattr(config.masking, 'mask_ratio') else 'random'}\n"
         )
+
+    # Special token IDs to exclude from loss calculation
+    special_token_ids = [
+        tokenizer.pad_token_id,
+        tokenizer.bos_token_id,
+        tokenizer.eos_token_id,
+    ]
+
+    if debug and accelerator.is_local_main_process:
+        logger.info(f"Special token IDs excluded from loss: {special_token_ids}")
+
+        # Check first batch from dataloader
+        first_batch = next(iter(train_loader))
+        logger.info("First batch statistics:")
+        logger.info(f"  - input_ids shape: {first_batch['input_ids'].shape}")
+        if "attention_mask" in first_batch:
+            logger.info(
+                f"  - attention_mask shape: {first_batch['attention_mask'].shape}"
+            )
+            mask_sum = first_batch["attention_mask"].sum().item()
+            total = first_batch["attention_mask"].numel()
+            logger.info(
+                f"  - attention_mask active: {mask_sum}/{total} ({mask_sum / total:.2%})"
+            )
 
     # Train the model
     try:
         history = trainer.train(
             train_dataloader=train_loader,
             num_epochs=config.training.num_epochs,
-            mask_prob=config.masking.mask_ratio,
+            mask_prob=config.masking.mask_ratio
+            if hasattr(config.masking, "mask_ratio")
+            else None,
+            special_token_ids=special_token_ids,
             val_dataloader=val_loader,
             early_stopping_patience=config.training.early_stopping_patience,
         )
@@ -294,10 +359,15 @@ if __name__ == "__main__":
         default="configs/default.yaml",
         help="Path to config file",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable detailed diagnostics for debugging",
+    )
     args = parser.parse_args()
 
     try:
-        main(args.config)
+        main(args.config, debug=args.debug)
     except (FileNotFoundError, yaml.YAMLError) as e:
         logging.error(f"Configuration error: {e}")
         sys.exit(1)

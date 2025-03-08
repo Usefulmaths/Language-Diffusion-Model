@@ -1,4 +1,3 @@
-# Toy configuration for small-scale experiments
 seed: 42
 
 tokenizer:
@@ -19,27 +18,27 @@ transformer:
 
 masking:
   strategy: "random"
-  mask_ratio: null # Random mask ratio per batch
+  mask_ratio: 0.15 # Fixed mask ratio for consistency
 
 training:
   batch_size: 4
-  learning_rate: 4.0e-4
-  weight_decay: 0.01
-  num_epochs: 5
+  learning_rate: 0.001 # Increased learning rate for faster progress
+  weight_decay: 0.001 # Reduced weight decay to lessen regularization
+  num_epochs: 10 # More epochs for a better learning signal
   max_length: 128
   num_workers: 1
   device: "cpu"
   use_amp: false
   gradient_clip_val: 1.0
-  early_stopping_patience: 3
+  early_stopping_patience: 5 # Increased patience for early stopping
   log_interval: 10
   checkpoint_dir: "checkpoints/toy"
   scheduler:
-    warmup_steps: 100
+    warmup_steps: 20 # Fewer warmup steps for a toy experiment
     initial_lr: 0.0
-    peak_lr: 4.0e-4
-    stable_lr: 1.0e-4
-    final_lr: 1.0e-5
+    peak_lr: 0.001
+    stable_lr: 0.0005
+    final_lr: 0.0001
 
 data:
   train_file: "data/small_questions.txt"
