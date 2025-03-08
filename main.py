@@ -14,6 +14,7 @@ from typing import Literal, cast
 
 import torch
 import yaml
+from accelerate import Accelerator
 from torch.optim import AdamW
 
 from src.config import Config
@@ -49,6 +50,9 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
         yaml.YAMLError: If the YAML configuration is invalid
         ValueError: If configuration is invalid
     """
+    # Initialize accelerator for device detection and process coordination
+    accelerator = Accelerator()
+
     # Convert string path to Path object
     config_file = Path(config_path)
     if not config_file.exists():
@@ -57,7 +61,9 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
     # Set up logging
     setup_logging()
     logger = logging.getLogger(__name__)
-    logger.info(f"Loading configuration from {config_file}")
+
+    if accelerator.is_local_main_process:
+        logger.info(f"Loading configuration from {config_file}")
 
     try:
         # Load configuration
@@ -74,7 +80,9 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
     # Initialize tokenizer
     tokenizer_config = TokenizerConfig(**vars(config.tokenizer))
     tokenizer = DiffusionTokenizer(config=tokenizer_config)
-    logger.info(f"Initialized tokenizer with vocab size: {tokenizer.vocab_size}")
+
+    if accelerator.is_local_main_process:
+        logger.info(f"Initialized tokenizer with vocab size: {tokenizer.vocab_size}")
 
     # Update vocab_size in transformer config based on tokenizer
     config.transformer.vocab_size = tokenizer.vocab_size
@@ -82,10 +90,12 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
     # Initialize transformer
     transformer_config = DiffusionTransformerConfig(**vars(config.transformer))
     transformer = DiffusionTransformer(transformer_config)
-    logger.info(
-        f"Initialized transformer with {transformer_config.num_layers} layers, "
-        f"{transformer_config.d_model} dimensions"
-    )
+
+    if accelerator.is_local_main_process:
+        logger.info(
+            f"Initialized transformer with {transformer_config.num_layers} layers, "
+            f"{transformer_config.d_model} dimensions"
+        )
 
     # Initialize masking strategy
     masking_strategy = create_masking_strategy(
@@ -94,32 +104,38 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
     )
-    logger.info(f"Using masking strategy: {config.masking.strategy}")
+
+    if accelerator.is_local_main_process:
+        logger.info(f"Using masking strategy: {config.masking.strategy}")
 
     # Initialize model
     model = DiffusionLanguageModel(transformer, tokenizer, masking_strategy)
-    logger.info(
-        f"Model initialized with {sum(p.numel() for p in model.parameters())} "
-        f"parameters"
-    )
+
+    if accelerator.is_local_main_process:
+        logger.info(
+            f"Model initialized with {sum(p.numel() for p in model.parameters())} "
+            f"parameters"
+        )
 
     # Create dataloaders
     train_file_path = Path(config.data.train_file)
     if not train_file_path.exists():
         raise FileNotFoundError(f"Training file not found: {train_file_path}")
 
-    val_file: Path | None = None
+    val_file = None
     if config.data.val_file:
         val_file = Path(config.data.val_file)
         if not val_file.exists():
             raise FileNotFoundError(f"Validation file not found: {val_file}")
 
     # Calculate train/val split ratio only if no validation file provided
-    train_ratio: float | None = None
+    train_ratio = None
     if val_file is None:
         train_ratio = config.data.train_ratio
 
-    logger.info(f"Loading data from {train_file_path}")
+    if accelerator.is_local_main_process:
+        logger.info(f"Loading data from {train_file_path}")
+
     train_loader, val_loader = create_question_dataloaders(
         file_path=str(train_file_path),
         tokenizer=tokenizer,
@@ -129,9 +145,11 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
         shuffle=config.data.shuffle,
         num_workers=config.training.num_workers,
     )
-    logger.info(f"Created train dataloader with {len(train_loader)} batches")
-    if val_loader:
-        logger.info(f"Created validation dataloader with {len(val_loader)} batches")
+
+    if accelerator.is_local_main_process:
+        logger.info(f"Created train dataloader with {len(train_loader)} batches")
+        if val_loader:
+            logger.info(f"Created validation dataloader with {len(val_loader)} batches")
 
     # Initialize optimizer
     optimizer = AdamW(
@@ -161,45 +179,44 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
         final_lr=scheduler_config.final_lr,
     )
 
-    logger.info(
-        f"Using LLaDA scheduler with: "
-        f"warmup_steps={scheduler_config.warmup_steps}, "
-        f"peak_lr={peak_lr}, "
-        f"stable_lr={scheduler_config.stable_lr or peak_lr * 0.25}, "
-        f"final_lr={scheduler_config.final_lr or peak_lr * 0.025}"
-    )
+    if accelerator.is_local_main_process:
+        logger.info(
+            f"Using LLaDA scheduler with: "
+            f"warmup_steps={scheduler_config.warmup_steps}, "
+            f"peak_lr={peak_lr}, "
+            f"stable_lr={scheduler_config.stable_lr or peak_lr * 0.25}, "
+            f"final_lr={scheduler_config.final_lr or peak_lr * 0.025}"
+        )
 
     # Create checkpoint directory
     checkpoint_dir = Path(config.training.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine device
-    device = config.training.device
-    if device == "cuda" and not torch.cuda.is_available():
-        logger.warning("CUDA requested but not available, falling back to CPU")
-        device = "cpu"
+    # Initialize trainer with Accelerate
+    # Map AMP config to mixed precision setting
+    mixed_precision = "no"
+    if config.training.use_amp:
+        mixed_precision = "fp16"  # You could also support "bf16" in your config
 
-    # Initialize trainer
     trainer = DiffusionLanguageModelTrainer(
         model=model,
         optimizer=optimizer,
-        device=device,
         scheduler=scheduler,
         checkpoint_dir=str(checkpoint_dir),
         gradient_clip_val=config.training.gradient_clip_val,
-        use_amp=config.training.use_amp and device == "cuda",
+        mixed_precision=mixed_precision,
         log_interval=config.training.log_interval,
     )
 
-    # Log training configuration
-    logger.info(
-        f"Starting training with:\n"
-        f"  - Epochs: {config.training.num_epochs}\n"
-        f"  - Batch size: {config.training.batch_size}\n"
-        f"  - Learning rate: {config.training.learning_rate}\n"
-        f"  - Device: {device}\n"
-        f"  - Mixed precision: {config.training.use_amp and device == 'cuda'}\n"
-    )
+    # Log training configuration (only from main process)
+    if accelerator.is_local_main_process:
+        logger.info(
+            f"Starting training with:\n"
+            f"  - Epochs: {config.training.num_epochs}\n"
+            f"  - Batch size: {config.training.batch_size}\n"
+            f"  - Learning rate: {config.training.learning_rate}\n"
+            f"  - Mixed precision: {mixed_precision}\n"
+        )
 
     # Train the model
     try:
@@ -210,28 +227,32 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
             val_dataloader=val_loader,
             early_stopping_patience=config.training.early_stopping_patience,
         )
-        logger.info("Training completed successfully")
 
-        # Save final model
-        final_model_path = checkpoint_dir / "final_model.pt"
-        trainer.save_checkpoint(str(final_model_path))
-        logger.info(f"Final model saved to {final_model_path}")
+        if accelerator.is_local_main_process:
+            logger.info("Training completed successfully")
 
-        # Save final configuration
-        config_save_path = checkpoint_dir / "final_config.yaml"
-        config.save(str(config_save_path))
-        logger.info(f"Final configuration saved to {config_save_path}")
+            # Save final model (only from main process)
+            final_model_path = checkpoint_dir / "final_model.pt"
+            trainer.save_checkpoint(str(final_model_path))
+            logger.info(f"Final model saved to {final_model_path}")
+
+            # Save final configuration
+            config_save_path = checkpoint_dir / "final_config.yaml"
+            config.save(str(config_save_path))
+            logger.info(f"Final configuration saved to {config_save_path}")
 
         return history
     except KeyboardInterrupt:
-        logger.info("Training interrupted by user")
-        # Save interrupted model
-        interrupted_path = checkpoint_dir / "interrupted_model.pt"
-        trainer.save_checkpoint(str(interrupted_path))
-        logger.info(f"Interrupted model saved to {interrupted_path}")
+        if accelerator.is_local_main_process:
+            logger.info("Training interrupted by user")
+            # Save interrupted model
+            interrupted_path = checkpoint_dir / "interrupted_model.pt"
+            trainer.save_checkpoint(str(interrupted_path))
+            logger.info(f"Interrupted model saved to {interrupted_path}")
         return trainer.get_training_history()
     except Exception as e:
-        logger.exception(f"Error during training: {e}")
+        if accelerator.is_local_main_process:
+            logger.exception(f"Error during training: {e}")
         raise
 
 
