@@ -446,19 +446,24 @@ class DiffusionLanguageModelTrainer:
         dataloader: DataLoader,
         mask_prob: float = 0.15,
         special_token_ids: list[int] | None = None,
+        num_generation_examples: int = 3,
     ) -> float:
-        """Evaluate the model on a dataset.
+        """Evaluate the model on a dataset and show generation examples.
 
         Args:
             dataloader: DataLoader for evaluation data.
             mask_prob: Masking probability for evaluation.
             special_token_ids: Optional list of special token IDs to exclude from loss.
+            num_generation_examples: Number of examples to generate and display.
 
         Returns:
             Average loss on the dataset.
         """
         self.model.eval()
         total_loss = 0.0
+
+        # Store some examples for generation demonstration
+        generation_examples = []
 
         with torch.no_grad():
             progress_bar = tqdm(
@@ -467,7 +472,7 @@ class DiffusionLanguageModelTrainer:
                 disable=not self.accelerator.is_local_main_process,
             )
 
-            for batch in progress_bar:
+            for batch_idx, batch in enumerate(progress_bar):
                 if isinstance(batch, dict):
                     input_ids = batch["input_ids"]
                     attention_mask = batch.get("attention_mask")
@@ -475,6 +480,28 @@ class DiffusionLanguageModelTrainer:
                     input_ids = batch[0]
                     attention_mask = batch[1] if len(batch) > 1 else None
 
+                # Collect examples for generation if we don't have enough yet
+                if (
+                    len(generation_examples) < num_generation_examples
+                    and batch_idx % 5 == 0
+                ):
+                    # Save a sample from this batch
+                    example_idx = 0  # Use the first example in the batch
+                    if example_idx < input_ids.size(0):
+                        original_text = self.model.tokenizer.decode(
+                            input_ids[example_idx], skip_special_tokens=True
+                        )
+                        generation_examples.append(
+                            {
+                                "input_ids": input_ids[example_idx].clone(),
+                                "attention_mask": attention_mask[example_idx].clone()
+                                if attention_mask is not None
+                                else None,
+                                "original_text": original_text,
+                            }
+                        )
+
+                # Standard evaluation with loss calculation
                 logits, masked_input_ids, mask_indices = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -490,10 +517,84 @@ class DiffusionLanguageModelTrainer:
                     pad_token_id=self.model.tokenizer.pad_token_id,
                     special_token_ids=special_token_ids,
                     mask_ratio=mask_prob,
-                    debug_mode=False,  # Disable debugging for evaluation
+                    debug_mode=False,  # Disable debugging for standard evaluation
                 )
 
                 total_loss += loss.item()
+
+            # After calculating the loss, perform some generation examples
+            if self.accelerator.is_local_main_process and generation_examples:
+                self.logger.info("\n===== Generation Examples =====")
+
+                for i, example in enumerate(generation_examples):
+                    input_id = example["input_ids"].unsqueeze(0)  # Add batch dimension
+                    attn_mask = (
+                        example["attention_mask"].unsqueeze(0)
+                        if example["attention_mask"] is not None
+                        else None
+                    )
+
+                    # Original text
+                    self.logger.info(f"\nExample {i + 1}")
+                    self.logger.info(f"Original: {example['original_text']}")
+
+                    # Create different mask percentages to showcase model capabilities
+                    for test_mask_prob in [0.15, 0.30, 0.50]:
+                        # Apply masking
+                        logits, masked_input, mask_indices = self.model(
+                            input_ids=input_id,
+                            attention_mask=attn_mask,
+                            mask_prob=test_mask_prob,
+                        )
+
+                        # Get model predictions
+                        predictions = logits.argmax(dim=-1)
+
+                        # Replace mask tokens with predictions
+                        reconstructed_ids = masked_input.clone()
+                        mask_positions = (
+                            masked_input == self.model.tokenizer.mask_token_id
+                        ).nonzero(as_tuple=True)
+                        if mask_positions[0].numel() > 0:
+                            batch_indices, seq_positions = mask_positions
+                            reconstructed_ids[
+                                batch_indices, seq_positions
+                            ] = predictions[batch_indices, seq_positions]
+
+                        # Decode the reconstructed sequence
+                        reconstructed_text = self.model.tokenizer.decode(
+                            reconstructed_ids[0], skip_special_tokens=True
+                        )
+
+                        # Get the masked input as text for comparison
+                        masked_text = self.model.tokenizer.decode(
+                            masked_input[0], skip_special_tokens=True
+                        )
+
+                        # Log results
+                        self.logger.info(f"\n  Mask prob {test_mask_prob:.2f}:")
+                        self.logger.info(f"  Masked:   {masked_text}")
+                        self.logger.info(f"  Generated: {reconstructed_text}")
+
+                        # Calculate accuracy for this example
+                        total_masks = (
+                            (masked_input == self.model.tokenizer.mask_token_id)
+                            .sum()
+                            .item()
+                        )
+                        if total_masks > 0:
+                            correct_predictions = 0
+                            for b_idx, pos in zip(*mask_positions, strict=False):
+                                if predictions[b_idx, pos] == example["input_ids"][pos]:
+                                    correct_predictions += 1
+                            accuracy = correct_predictions / total_masks
+                            self.logger.info(
+                                f"  Accuracy: {accuracy:.2%} ({correct_predictions}/{total_masks})"
+                            )
+
+        # Log generation examples end marker
+        if self.accelerator.is_local_main_process:
+            self.logger.info("\n================================")
 
         return total_loss / len(dataloader)
 
