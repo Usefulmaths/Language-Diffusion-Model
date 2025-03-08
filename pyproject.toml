@@ -3,15 +3,16 @@ name = "diffusion-language-model"
 version = "0.1.0"
 description = "Python project diffusion-language-model"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12" # Pin to Python 3.11
 license = { text = "MIT" }
 dependencies = [
-    "accelerate>=1.4.0",
+    "accelerate==0.25.0",
     "numpy<2.0",
     "pre-commit>=4.1.0",
     "pytest>=8.3.5",
     "pytest-cov>=6.0.0",
-    "torch>=2.2.0",
+    "torch==2.1.0",
+    "torchvision==0.16.0",
     "transformers>=4.49.0",
     "types-pyyaml>=6.0.12.20241230",
 ]
