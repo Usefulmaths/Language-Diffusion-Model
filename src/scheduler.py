@@ -9,20 +9,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 
 
 class WarmupStableDecayLR(_LRScheduler):
-    """Learning rate scheduler that implements the Warmup-Stable-Decay pattern.
-
-    The scheduler follows these phases:
-    1. Warmup: Linear increase from initial_lr to peak_lr
-    2. First stable: Maintain peak_lr
-    3. Middle decay: Linear decay from peak_lr to stable_lr
-    4. Second stable: Maintain stable_lr
-    5. Final decay: Linear decay from stable_lr to final_lr
-
-    Note: While this implementation follows PyTorch's convention of returning a list of
-    learning rates (one per parameter group), the LLaDA paper uses a single learning
-    rate
-    for the entire model.
-    """
+    """Learning rate scheduler that implements the Warmup-Stable-Decay pattern."""
 
     def __init__(
         self,
@@ -37,26 +24,19 @@ class WarmupStableDecayLR(_LRScheduler):
         final_lr: float = 1e-7,
         last_epoch: int = -1,
     ):
-        """Initialize the scheduler.
-
-        Args:
-            optimizer: The optimizer to schedule
-            warmup_steps: Number of steps for linear warmup
-            stable_steps: Number of steps to maintain peak_lr
-            middle_decay_steps: Number of steps to decay from peak_lr to stable_lr
-            final_decay_steps: Number of steps for final decay from stable_lr to
-            final_lr
-            initial_lr: Initial learning rate at start of training
-            peak_lr: Learning rate after warmup (defaults to base_lr if None)
-            stable_lr: Learning rate during stable phase (defaults to 0.25 * peak_lr
-            if None)
-            final_lr: Final learning rate at end of training
-            last_epoch: The index of the last epoch
-        """
+        """Initialize the scheduler."""
         self.warmup_steps = warmup_steps
         self.stable_steps = stable_steps
         self.middle_decay_steps = middle_decay_steps
         self.final_decay_steps = final_decay_steps
+
+        # Calculate phase transition points
+        self.phase2_start = warmup_steps
+        self.phase3_start = warmup_steps + stable_steps
+        self.phase4_start = warmup_steps + stable_steps + middle_decay_steps
+        self.phase5_start = (
+            warmup_steps + stable_steps + middle_decay_steps + final_decay_steps
+        )
 
         # Set default peak_lr from optimizer if not provided
         base_lr = optimizer.param_groups[0]["lr"]
@@ -65,57 +45,53 @@ class WarmupStableDecayLR(_LRScheduler):
         self.stable_lr = stable_lr if stable_lr is not None else self.peak_lr * 0.25
         self.final_lr = final_lr
 
+        # Initialize parent class - this will call get_lr() once
         super().__init__(optimizer, last_epoch)
 
-    def get_lr(self) -> list[float]:
-        """Calculate the learning rate for the current step.
+        # Override the initial LR explicitly for all parameter groups
+        if self.last_epoch == 0:
+            for param_group, lr in zip(
+                self.optimizer.param_groups, self.get_lr(), strict=False
+            ):
+                param_group["lr"] = lr
 
-        Returns:
-            List of learning rates, one for each parameter group
-        """
+    def get_lr(self) -> list[float]:
+        """Calculate the learning rate for the current step."""
         step = self.last_epoch
 
-        # Warmup phase: Linear increase from initial_lr to peak_lr
-        if step < self.warmup_steps:
-            factor = step / self.warmup_steps if self.warmup_steps > 0 else 1.0
-            return [
-                self.initial_lr + factor * (self.peak_lr - self.initial_lr)
-                for _ in self.base_lrs
-            ]
+        # Define phase boundaries
+        phase1_end = self.warmup_steps
+        phase2_end = phase1_end + self.stable_steps
+        phase3_end = phase2_end + self.middle_decay_steps
+        phase4_end = phase3_end + self.final_decay_steps
 
-        # First stable phase: maintain peak_lr
-        step = step - self.warmup_steps
-        if step < self.stable_steps:
+        # Phase 1: Warmup
+        if step < phase1_end:
+            factor = step / self.warmup_steps if self.warmup_steps > 0 else 1.0
+            lr = self.initial_lr + factor * (self.peak_lr - self.initial_lr)
+            return [lr for _ in self.base_lrs]
+
+        # Phase 2: First stable phase
+        elif step < phase2_end:
             return [self.peak_lr for _ in self.base_lrs]
 
-        # Middle decay phase: Linear decay from peak_lr to stable_lr
-        step = step - self.stable_steps
-        if step < self.middle_decay_steps:
-            factor = (
-                step / self.middle_decay_steps if self.middle_decay_steps > 0 else 1.0
-            )
-            return [
-                self.peak_lr - factor * (self.peak_lr - self.stable_lr)
-                for _ in self.base_lrs
-            ]
+        # Phase 3: Middle decay
+        elif step < phase3_end:
+            phase_step = step - phase2_end
+            factor = phase_step / self.middle_decay_steps
+            lr = self.peak_lr - factor * (self.peak_lr - self.stable_lr)
+            return [lr for _ in self.base_lrs]
 
-        # Second stable phase: maintain stable_lr
-        step = step - self.middle_decay_steps
-        if step < 0:
-            return [self.stable_lr for _ in self.base_lrs]
+        # Phase 4: Final decay
+        elif step < phase4_end:
+            phase_step = step - phase3_end
+            factor = phase_step / self.final_decay_steps
+            lr = self.stable_lr - factor * (self.stable_lr - self.final_lr)
+            return [lr for _ in self.base_lrs]
 
-        # Final decay phase: Linear decay from stable_lr to final_lr
-        if step < self.final_decay_steps:
-            factor = (
-                step / self.final_decay_steps if self.final_decay_steps > 0 else 1.0
-            )
-            return [
-                self.stable_lr - factor * (self.stable_lr - self.final_lr)
-                for _ in self.base_lrs
-            ]
-
-        # Beyond final decay: maintain final_lr
-        return [self.final_lr for _ in self.base_lrs]
+        # Phase 5: Final LR
+        else:
+            return [self.final_lr for _ in self.base_lrs]
 
 
 def create_scheduler(

@@ -24,7 +24,7 @@ masking:
 training:
   batch_size: 16
   learning_rate: 4.0e-4 # Match paper (4 × 10^-4)
-  weight_decay: 0.01
+  weight_decay: 0.1
   num_epochs: 10
   max_length: 512
   num_workers: 4

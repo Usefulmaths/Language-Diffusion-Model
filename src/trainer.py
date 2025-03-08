@@ -198,7 +198,7 @@ class DiffusionLanguageModelTrainer:
         Args:
             input_ids: Input token ids of shape [batch_size, seq_len].
             attention_mask: Attention mask of shape [batch_size, seq_len].
-            mask_prob: Optional probability of masking each token.
+            mask_prob: Probability of masking each token.
             special_token_ids: Optional list of special token IDs to exclude from loss.
 
         Returns:
@@ -211,7 +211,7 @@ class DiffusionLanguageModelTrainer:
         logits, masked_input_ids, mask_indices = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            mask_prob=mask_prob,
+            mask_prob=mask_prob,  # Use the explicitly provided mask_prob value
         )
 
         # Save pre-loss state for diagnostics
@@ -222,7 +222,7 @@ class DiffusionLanguageModelTrainer:
                 f"  - Input shape: [{batch_size}, {seq_len}], Logits shape: [{batch_size}, {seq_len}, {vocab_size}]"
             )
 
-        # Calculate loss
+        # Calculate loss - must use the same mask_prob value as in forward pass
         loss = variational_lower_bound_loss(
             logits=logits,
             targets=input_ids,
@@ -231,7 +231,7 @@ class DiffusionLanguageModelTrainer:
             attention_mask=attention_mask,
             pad_token_id=self.model.tokenizer.pad_token_id,
             special_token_ids=special_token_ids,
-            mask_ratio=mask_prob if mask_prob is not None else 0.5,
+            mask_ratio=mask_prob,  # Use the same mask_prob value, not the default 0.5
             debug_mode=self.debug_mode,
             step=self.global_step,
             log_interval=self.log_interval,
@@ -301,10 +301,15 @@ class DiffusionLanguageModelTrainer:
         )
 
         for step, batch in enumerate(progress_bar):
+            # Sample a random mask probability for each batch if not fixed
+            batch_mask_prob = mask_prob
+            if batch_mask_prob is None:
+                batch_mask_prob = torch.rand(1).item()  # Sample from U[0,1]
+
             step_metrics = self.train_step(
                 input_ids=batch["input_ids"],
                 attention_mask=batch.get("attention_mask", None),
-                mask_prob=mask_prob,
+                mask_prob=batch_mask_prob,  # Use the sampled value
                 special_token_ids=special_token_ids,
             )
 
