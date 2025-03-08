@@ -42,7 +42,7 @@ training:
     final_lr: 1.0e-5
 
 data:
-  train_file: "data/questions.txt"
+  train_file: "data/small_questions.txt"
   val_file: null # Use train_ratio to split if null
   train_ratio: 0.9
   shuffle: true

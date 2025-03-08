@@ -14,7 +14,7 @@ def masked_cross_entropy_loss(
     attention_mask: Tensor | None = None,
     pad_token_id: int | None = None,
     special_token_ids: list[int] | None = None,
-    mask_ratio: float = 1.0,
+    mask_ratio: float | None = 1.0,
     debug_mode: bool = False,
     step: int = 0,
     log_interval: int = 100,
@@ -102,17 +102,21 @@ def masked_cross_entropy_loss(
     # Store the raw loss before scaling for diagnostics
     loss = raw_loss
 
-    # Calculate scaling factor
+    # Calculate scaling factor - FIX: Handle None mask_ratio
     scaling_factor = 1.0
-    if mask_ratio > 0:
+
+    # Use a default mask ratio if None is provided
+    actual_mask_ratio = 0.15 if mask_ratio is None else mask_ratio
+
+    if actual_mask_ratio > 0:
         # Adjust by the proportion of tokens that were eligible vs. all masked tokens
         # This ensures we properly normalize the loss regardless of filtering
         total_masked = mask_indices.sum().item()
         if total_masked > 0:
             eligibility_ratio = num_eligible_tokens / total_masked
-            scaling_factor = mask_ratio * eligibility_ratio
+            scaling_factor = actual_mask_ratio * eligibility_ratio
             loss = loss / scaling_factor
-    elif mask_ratio == 0:
+    elif actual_mask_ratio == 0:
         # Handle the zero mask_ratio case by setting a large but finite value
         scaling_factor = 1e-6
         loss = loss / scaling_factor
@@ -120,7 +124,7 @@ def masked_cross_entropy_loss(
     # Diagnostics for loss scaling
     if debug_mode and step % log_interval == 0 and logger is not None:
         logger.info(f"    - Raw loss (before scaling): {raw_loss.item():.6f}")
-        logger.info(f"    - Mask ratio: {mask_ratio:.6f}")
+        logger.info(f"    - Mask ratio: {actual_mask_ratio:.6f}")
         logger.info(f"    - Scaling factor: {scaling_factor:.6f}")
         logger.info(f"    - Final scaled loss: {loss.item():.6f}")
 
@@ -161,7 +165,7 @@ def variational_lower_bound_loss(
     attention_mask: Tensor | None = None,
     pad_token_id: int | None = None,
     special_token_ids: list[int] | None = None,
-    mask_ratio: float = 1.0,
+    mask_ratio: float | None = 1.0,
     debug_mode: bool = False,
     step: int = 0,
     log_interval: int = 100,
