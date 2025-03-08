@@ -81,10 +81,14 @@ class DiffusionLanguageModelTrainer:
         self.best_loss: float = float("inf")
         self.global_step: int = 0
 
-        # Prepare model, optimizer and scheduler with accelerator
-        self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
-            self.model, self.optimizer, self.scheduler
+        # Prepare model and optimizer with accelerator
+        self.model, self.optimizer = self.accelerator.prepare(
+            self.model, self.optimizer
         )
+
+        # Prepare scheduler separately if it exists
+        if self.scheduler is not None:
+            self.scheduler = self.accelerator.prepare(self.scheduler)
 
     def train_step(
         self,
@@ -246,10 +250,9 @@ class DiffusionLanguageModelTrainer:
         Returns:
             List of TrainingMetrics objects containing metrics for each epoch.
         """
-        # Prepare dataloaders with accelerate
-        train_dataloader = self.accelerator.prepare(train_dataloader)
-        if val_dataloader:
-            val_dataloader = self.accelerator.prepare(val_dataloader)
+        train_dataloader = self.accelerator.prepare_data_loader(train_dataloader)
+        if val_dataloader is not None:
+            val_dataloader = self.accelerator.prepare_data_loader(val_dataloader)
 
         if self.accelerator.is_local_main_process:
             self.logger.info(f"Starting training for {num_epochs} epochs")
