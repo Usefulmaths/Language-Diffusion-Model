@@ -1,0 +1,48 @@
+# Default configuration based on the LLaDA paper
+seed: 42
+
+tokenizer:
+  tokenizer_name: "bert-base-uncased"
+  mask_token: "[MASK]"
+  pad_token: "[PAD]"
+  bos_token: "[CLS]"
+  eos_token: "[SEP]"
+
+transformer:
+  d_model: 768
+  nhead: 12
+  num_layers: 12
+  dim_feedforward: 3072
+  dropout: 0.1
+  layer_norm_eps: 1.0e-12
+  max_position_embeddings: 512
+
+masking:
+  strategy: "random"
+  mask_ratio: null # Random mask ratio per batch
+
+training:
+  batch_size: 16
+  learning_rate: 4.0e-4 # Match paper (4 × 10^-4)
+  weight_decay: 0.01
+  num_epochs: 10
+  max_length: 512
+  num_workers: 4
+  device: "cuda"
+  use_amp: true
+  gradient_clip_val: 1.0
+  early_stopping_patience: 3
+  log_interval: 100
+  checkpoint_dir: "checkpoints"
+  scheduler:
+    warmup_steps: 2000
+    initial_lr: 0.0
+    peak_lr: 4.0e-4 # Same as learning_rate
+    stable_lr: 1.0e-4
+    final_lr: 1.0e-5
+
+data:
+  train_file: "data/questions.txt"
+  val_file: null # Use train_ratio to split if null
+  train_ratio: 0.9
+  shuffle: true
