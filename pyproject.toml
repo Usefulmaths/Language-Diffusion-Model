@@ -5,7 +5,14 @@ description = "Python project diffusion-language-model"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-dependencies = ["numpy>=2.2.3", "torch==2.2.0"]
+dependencies = [
+    "numpy<2.0",
+    "pre-commit>=4.1.0",
+    "pytest>=8.3.5",
+    "pytest-cov>=6.0.0",
+    "torch==2.2.0",
+    "transformers>=4.49.0",
+]
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]
@@ -24,8 +31,8 @@ line-length = 88
 target-version = "py312"
 lint.select = ["E", "F", "I", "N", "W", "D", "UP", "B", "C4", "SIM", "ERA"]
 lint.ignore = []
-fix = true
 lint.unfixable = []
+fix = true
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -44,6 +51,8 @@ warn_return_any = true
 warn_unreachable = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+ignore_missing_imports = true
+disable_error_code = ["misc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

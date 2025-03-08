@@ -19,6 +19,7 @@ class MaskingStrategy(Protocol):
         mask_token_id: int,
         mask_prob: float,
         pad_token_id: int | None = None,
+        special_token_ids: list[int] | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Apply random masking to input tokens.
 
@@ -27,6 +28,7 @@ class MaskingStrategy(Protocol):
             mask_token_id: ID of the mask token
             mask_prob: Probability of masking each token
             pad_token_id: ID of the padding token (optional)
+            special_token_ids: Additional special token IDs to exclude from masking
 
         Returns:
             Tuple containing:
@@ -67,31 +69,95 @@ class MaskingStrategy(Protocol):
 class RandomMaskingStrategy:
     """Implements random masking and remasking for the LLaDA model."""
 
+    def __init__(
+        self,
+        bos_token_id: int = 101,  # Default BERT [CLS]
+        eos_token_id: int = 102,  # Default BERT [SEP]
+        cls_token_id: int | None = None,
+        sep_token_id: int | None = None,
+        pad_token_id: int | None = 0,
+        default_special_token_ids: list[int] | None = None,
+    ):
+        """Initialize the masking strategy.
+
+        Args:
+            bos_token_id: ID of the beginning of sequence token
+            eos_token_id: ID of the end of sequence token
+            cls_token_id: ID of the classification token (if different from BOS)
+            sep_token_id: ID of the separator token (if different from EOS)
+            pad_token_id: ID of the padding token
+            default_special_token_ids: Additional special token IDs to always exclude
+            from masking
+        """
+        # Initialize list of special tokens to exclude from masking
+        self.special_token_ids = [bos_token_id, eos_token_id]
+
+        # Add cls_token_id if provided and not already in the list
+        if cls_token_id is not None and cls_token_id not in self.special_token_ids:
+            self.special_token_ids.append(cls_token_id)
+
+        # Add sep_token_id if provided and not already in the list
+        if sep_token_id is not None and sep_token_id not in self.special_token_ids:
+            self.special_token_ids.append(sep_token_id)
+
+        # Store pad_token_id separately as it's often handled differently
+        self.pad_token_id = pad_token_id
+
+        # Add any additional special tokens
+        if default_special_token_ids:
+            for token_id in default_special_token_ids:
+                if token_id not in self.special_token_ids:
+                    self.special_token_ids.append(token_id)
+
     def apply_random_mask(
         self,
         input_ids: Tensor,
         mask_token_id: int,
         mask_prob: float,
         pad_token_id: int | None = None,
+        special_token_ids: list[int] | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Apply random masking to input tokens.
 
         Randomly masks tokens with probability mask_prob, excluding padding and
         special tokens. Completely vectorized implementation.
+
+        Args:
+            input_ids: Input token IDs of shape [batch_size, seq_len]
+            mask_token_id: ID of the mask token
+            mask_prob: Probability of masking each token
+            pad_token_id: ID of the padding token (override instance default)
+            special_token_ids: Additional special token IDs to exclude from masking
+
+        Returns:
+            Tuple containing:
+            - masked_input: Input with masks applied
+            - mask_indices: Boolean tensor indicating which tokens were masked
         """
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
         masked_input = input_ids.clone()
 
-        # Identify special tokens to exclude from masking
-        special_tokens_mask = (
-            (input_ids == 101)  # CLS/BOS
-            | (input_ids == 102)  # SEP/EOS
-        )
+        # Start with an empty special tokens mask
+        special_tokens_mask = torch.zeros_like(input_ids, dtype=torch.bool)
 
-        # Add PAD tokens to excluded tokens if specified
-        if pad_token_id is not None:
-            special_tokens_mask = special_tokens_mask | (input_ids == pad_token_id)
+        # Add class-level special tokens to mask
+        for token_id in self.special_token_ids:
+            special_tokens_mask = special_tokens_mask | (input_ids == token_id)
+
+        # Add function parameter special tokens to mask
+        if special_token_ids:
+            for token_id in special_token_ids:
+                special_tokens_mask = special_tokens_mask | (input_ids == token_id)
+
+        # Add PAD tokens to excluded tokens - use parameter first, then instance default
+        pad_token_id_to_use = (
+            pad_token_id if pad_token_id is not None else self.pad_token_id
+        )
+        if pad_token_id_to_use is not None:
+            special_tokens_mask = special_tokens_mask | (
+                input_ids == pad_token_id_to_use
+            )
 
         # Create mask for eligible tokens (non-special tokens)
         eligible_mask = ~special_tokens_mask
@@ -157,6 +223,20 @@ class RandomMaskingStrategy:
 
         For the random strategy, we randomly select tokens to remask across all batches
         in a fully vectorized approach.
+
+        Args:
+            sequence: Current sequence with masks
+            predictions: Predicted tokens from the model
+            logits: Raw logits from the model
+            mask_indices: Boolean tensor indicating which tokens are masked
+            mask_token_id: ID of the mask token
+            remask_ratio: Ratio of tokens to be remasked
+            prompt_len: Length of the prompt-tokens before prompt_len won't be remasked
+            use_confidence: Whether to use token confidence for remasking
+            (unused in random strategy)
+
+        Returns:
+            Next sequence with remasked tokens
         """
         next_sequence = sequence.clone()
         device = sequence.device
@@ -170,10 +250,11 @@ class RandomMaskingStrategy:
         if prompt_len > 0:
             valid_tokens[:, :prompt_len] = False
 
-        # 2. Exclude special tokens
-        special_tokens = torch.isin(
-            sequence, torch.tensor([0, 101, 102], device=device)
+        # 2. Exclude special tokens - using the class-level special tokens
+        special_tokens_tensor = torch.tensor(
+            [0] + self.special_token_ids, device=device
         )
+        special_tokens = torch.isin(sequence, special_tokens_tensor)
         valid_tokens = valid_tokens & (~special_tokens)
 
         # Count total valid tokens
