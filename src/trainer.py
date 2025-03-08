@@ -43,25 +43,26 @@ class DiffusionLanguageModelTrainer:
         self,
         model: DiffusionLanguageModel,
         optimizer: Optimizer,
+        accelerator: Accelerator | None = None,
         scheduler: LRScheduler | None = None,
         checkpoint_dir: str | None = None,
         log_interval: int = 100,
         gradient_clip_val: float | None = None,
-        mixed_precision: str = "no",  # Options: "no", "fp16", "bf16"
     ):
         """Initialize the trainer.
 
         Args:
             model: Diffusion language model to train.
             optimizer: Optimizer for parameter updates.
+            accelerator: Pre-initialized accelerator instance.
             scheduler: Learning rate scheduler.
             checkpoint_dir: Directory to save checkpoints.
             log_interval: Number of steps between logging.
             gradient_clip_val: Maximum gradient norm for gradient clipping.
-            mixed_precision: Precision to use for training ("no", "fp16", or "bf16").
         """
-        # Initialize accelerator
-        self.accelerator = Accelerator(mixed_precision=mixed_precision)
+        # Use provided accelerator or create a new one if not provided
+        # This avoids re-initializing the accelerator if it already exists
+        self.accelerator = accelerator or Accelerator()
 
         self.model = model
         self.optimizer = optimizer
@@ -81,14 +82,14 @@ class DiffusionLanguageModelTrainer:
         self.best_loss: float = float("inf")
         self.global_step: int = 0
 
-        # Prepare model and optimizer with accelerator
-        self.model, self.optimizer = self.accelerator.prepare(
-            self.model, self.optimizer
-        )
+        # Prepare model and optimizer with accelerator (separately to avoid tupl
+        # unpacking issues)
+        self.model = self.accelerator.prepare(model)
+        self.optimizer = self.accelerator.prepare(optimizer)
 
-        # Prepare scheduler separately if it exists
+        # Prepare scheduler if provided
         if self.scheduler is not None:
-            self.scheduler = self.accelerator.prepare(self.scheduler)
+            self.scheduler = self.accelerator.prepare(scheduler)
 
     def train_step(
         self,
@@ -250,9 +251,10 @@ class DiffusionLanguageModelTrainer:
         Returns:
             List of TrainingMetrics objects containing metrics for each epoch.
         """
-        train_dataloader = self.accelerator.prepare_data_loader(train_dataloader)
+        # Prepare dataloaders with accelerate (separately to avoid issues)
+        train_dataloader = self.accelerator.prepare(train_dataloader)
         if val_dataloader is not None:
-            val_dataloader = self.accelerator.prepare_data_loader(val_dataloader)
+            val_dataloader = self.accelerator.prepare(val_dataloader)
 
         if self.accelerator.is_local_main_process:
             self.logger.info(f"Starting training for {num_epochs} epochs")

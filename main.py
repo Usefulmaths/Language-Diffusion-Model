@@ -9,6 +9,7 @@ a YAML file to allow for flexible experimentation.
 import argparse
 import logging
 import sys
+import traceback
 from pathlib import Path
 from typing import Literal, cast
 
@@ -36,6 +37,34 @@ def setup_logging() -> None:
     )
 
 
+def get_accelerator(use_amp: bool) -> Accelerator:
+    """Create an accelerator instance with the appropriate settings.
+
+    Args:
+        use_amp: Whether to use automatic mixed precision.
+
+    Returns:
+        An Accelerator instance.
+    """
+    # Determine mixed precision setting
+    mixed_precision = "no"
+    if use_amp and torch.cuda.is_available():
+        mixed_precision = "fp16"
+
+    # Create a single accelerator instance
+    try:
+        # First, try to create with specified settings
+        return Accelerator(mixed_precision=mixed_precision)
+    except RuntimeError:
+        # If accelerator is already initialized, create with default settings
+        # and log a warning
+        logging.warning(
+            "Accelerator already initialized. Using existing instance. "
+            "Restart your runtime for full control over acceleration settings."
+        )
+        return Accelerator()
+
+
 def main(config_path: str | Path) -> list[TrainingMetrics]:
     """Main training function.
 
@@ -50,9 +79,6 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
         yaml.YAMLError: If the YAML configuration is invalid
         ValueError: If configuration is invalid
     """
-    # Initialize accelerator for device detection and process coordination
-    accelerator = Accelerator()
-
     # Convert string path to Path object
     config_file = Path(config_path)
     if not config_file.exists():
@@ -61,9 +87,7 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
     # Set up logging
     setup_logging()
     logger = logging.getLogger(__name__)
-
-    if accelerator.is_local_main_process:
-        logger.info(f"Loading configuration from {config_file}")
+    logger.info(f"Loading configuration from {config_file}")
 
     try:
         # Load configuration
@@ -71,6 +95,15 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
     except yaml.YAMLError as e:
         logger.error(f"Invalid configuration: {e}")
         raise
+
+    # Get the appropriate accelerator
+    accelerator = get_accelerator(use_amp=config.training.use_amp)
+
+    # Log the device and mixed precision information
+    device_type = "GPU" if torch.cuda.is_available() else "CPU"
+    precision_mode = accelerator.mixed_precision
+    if accelerator.is_local_main_process:
+        logger.info(f"Using {device_type} with precision mode: {precision_mode}")
 
     # Set random seed for reproducibility
     torch.manual_seed(config.seed)
@@ -122,14 +155,14 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
     if not train_file_path.exists():
         raise FileNotFoundError(f"Training file not found: {train_file_path}")
 
-    val_file = None
+    val_file: Path | None = None
     if config.data.val_file:
         val_file = Path(config.data.val_file)
         if not val_file.exists():
             raise FileNotFoundError(f"Validation file not found: {val_file}")
 
     # Calculate train/val split ratio only if no validation file provided
-    train_ratio = None
+    train_ratio: float | None = None
     if val_file is None:
         train_ratio = config.data.train_ratio
 
@@ -192,30 +225,26 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
     checkpoint_dir = Path(config.training.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize trainer with Accelerate
-    # Map AMP config to mixed precision setting
-    mixed_precision = "no"
-    if config.training.use_amp:
-        mixed_precision = "fp16"  # You could also support "bf16" in your config
-
+    # Initialize trainer passing our accelerator instance
     trainer = DiffusionLanguageModelTrainer(
         model=model,
         optimizer=optimizer,
+        accelerator=accelerator,  # Pass the existing accelerator
         scheduler=scheduler,
         checkpoint_dir=str(checkpoint_dir),
         gradient_clip_val=config.training.gradient_clip_val,
-        mixed_precision=mixed_precision,
         log_interval=config.training.log_interval,
     )
 
-    # Log training configuration (only from main process)
+    # Log device and mixed precision information
     if accelerator.is_local_main_process:
         logger.info(
             f"Starting training with:\n"
             f"  - Epochs: {config.training.num_epochs}\n"
             f"  - Batch size: {config.training.batch_size}\n"
             f"  - Learning rate: {config.training.learning_rate}\n"
-            f"  - Mixed precision: {mixed_precision}\n"
+            f"  - Device: {device_type}\n"
+            f"  - Mixed precision: {precision_mode}\n"
         )
 
     # Train the model
@@ -252,7 +281,8 @@ def main(config_path: str | Path) -> list[TrainingMetrics]:
         return trainer.get_training_history()
     except Exception as e:
         if accelerator.is_local_main_process:
-            logger.exception(f"Error during training: {e}")
+            logger.error(f"Training failed: {e}")
+            logger.error(f"Detailed traceback: {traceback.format_exc()}")
         raise
 
 
