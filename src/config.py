@@ -46,7 +46,6 @@ class RemaskingConfig:
 
     strategy: Literal["random"] = "random"
     remask_ratio: float = 0.15  # Ratio of tokens to remask
-    prompt_positions: bool = False  # Whether to remask prompt tokens
 
 
 @dataclass
@@ -67,7 +66,6 @@ class EvaluationConfig:
     eval_steps: int = 100  # Evaluate every N steps
     eval_mask_ratio: float = 0.15  # Fixed mask ratio for evaluation
     num_examples: int = 3  # Number of generation examples to show during evaluation
-    eval_batch_size: int = 16  # Batch size for evaluation
 
 
 @dataclass
@@ -80,13 +78,8 @@ class TrainingConfig:
     num_epochs: int = 10
     max_length: int = 512
     num_workers: int = 4
-    device: str = "cuda"
-    use_amp: bool = True
-    gradient_clip_val: float = 1.0
-    early_stopping_patience: int | None = 3
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
-    log_interval: int = 100
     checkpoint_dir: str = "checkpoints"
 
 
@@ -95,7 +88,6 @@ class DataConfig:
     """Configuration for dataset."""
 
     train_file: str = "data/questions.txt"
-    val_file: str | None = None
     train_ratio: float = 0.9
     shuffle: bool = True
 

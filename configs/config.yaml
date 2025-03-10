@@ -19,7 +19,6 @@ masking:
 remasking:
   strategy: "random"
   remask_ratio: null
-  prompt_positions: null
 training:
   batch_size: 512
   learning_rate: 0.0005
@@ -27,17 +26,11 @@ training:
   num_epochs: 100
   max_length: 64
   num_workers: 4
-  device: "cuda"
-  use_amp: true
-  gradient_clip_val: 1.0
-  early_stopping_patience: null
-  log_interval: 50
   checkpoint_dir: "checkpoints"
   evaluation:
     eval_steps: 500
     eval_mask_ratio: 0.15
     num_examples: 5
-    eval_batch_size: 32
   scheduler:
     warmup_steps: 500
     initial_lr: 0.0001
@@ -46,6 +39,5 @@ training:
     final_lr: 0.0001
 data:
   train_file: "/content/drive/MyDrive/data/filtered_questions.txt"
-  val_file: null
   train_ratio: 0.9
   shuffle: true
